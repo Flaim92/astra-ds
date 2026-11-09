@@ -208,6 +208,6 @@ TXxTPQ14xbxrr2D6HeG3d27K3fm8kaKWus
 
 ## Лицензия
 
-GPL-3.0, текст в файле [LICENSE](LICENSE). Сторонний код в `third_party/` распространяется под своими лицензиями: cJSON (MIT) и заголовок WebView2 (BSD-подобная лицензия Microsoft). Шумоподавление микрофона — SpeexDSP и RNNoise (Xiph.Org, BSD-3), собираются из исходников и компонуются статически; тексты лицензий — в `third_party/LICENSE`.
+GPL-3.0, текст в файле [LICENSE](LICENSE). Сторонний код в `third_party/` распространяется под своими лицензиями: cJSON (MIT) и заголовок WebView2 (BSD-подобная лицензия Microsoft). Шумоподавление микрофона сделано на SpeexDSP и RNNoise (Xiph.Org, BSD-3): они собираются из исходников и компонуются статически, тексты их лицензий лежат в `third_party/LICENSE`.
 
 Astra DS не связан с Discord Inc. Discord является товарным знаком Discord Inc.
