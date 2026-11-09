@@ -4008,7 +4008,7 @@ static void draw_forum(int cx, int cw, int H, const Channel *oc) {
             g_texte(x + 2 + a, y + 1, pv[0] ? pv : "(без текста)", w - 4 - a, C_MUTED, 0);
             free(pv);
             /* 3: сколько сообщений, когда последнее, участвую ли */
-            char t3[120], d[32] = "";
+            char t3[160], d[64] = "";
             if (fp->last_msg > (1ULL << 32)) {   /* id-снежинка: время в старших битах */
                 i64 ts = (i64)(((fp->last_msg >> 22) + 1420070400000ULL) / 1000);
                 struct tm tm;
