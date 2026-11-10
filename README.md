@@ -236,6 +236,7 @@ VIDEO=1 bash build.sh       # Video: build/astra-ds-video
 | `src/ui.c` | интерфейс: раскладка как у Discord, мышь и клавиатура |
 | `src/gui_win.c`, `gui_x11.c`, `gui_grid.c` | окно-сетка символов для Windows и Linux |
 | `src/store.c` | модель данных, права, события Discord |
+| `src/memlist.c` | список участников сервера по ролям |
 | `src/net.c` | запросы к Discord и постоянное соединение |
 | `src/voice.c`, `voicefx.c` | голос, шифрование DAVE, голосовые сообщения, смена голоса |
 | `src/img.c` | картинки в цветной ASCII |
@@ -275,6 +276,7 @@ TXxTPQ14xbxrr2D6HeG3d27K3fm8kaKWus
 GPL-3.0, текст в файле [LICENSE](LICENSE). Сторонний код распространяется под своими лицензиями, тексты лежат в `third_party/LICENSE`:
 
 - в `third_party/`: cJSON (MIT), заголовок WebView2 (BSD-подобная лицензия Microsoft), libcurl-impersonate (MIT), кодер H.264 minih264 (CC0), детектор лица pico (MIT, только Video);
-- собираются из исходников: SpeexDSP и RNNoise (BSD-3), libjpeg-turbo (BSD-подобная и IJG), а для Video FFmpeg (LGPL-2.1, без GPL-частей) и dav1d (BSD-2).
+- собираются из исходников: zlib, OpenSSL (Apache-2.0), curl, Opus, libdave и MLSpp, nlohmann/json, Brotli, SpeexDSP и RNNoise (BSD-3), libjpeg-turbo (IJG и BSD-подобная), а для Video FFmpeg (LGPL-2.1, без GPL-частей) и dav1d (BSD-2);
+- туннель VLESS: Xray-core (MPL-2.0), Go и его модули.
 
 Astra DS не связан с Discord Inc. Discord является товарным знаком Discord Inc.
