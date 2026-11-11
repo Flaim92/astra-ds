@@ -938,6 +938,10 @@ static void t_mouse(void) {
     VoiceStatus vs;
     voice_status(&vs);
     check(vs.phase != VS_IDLE && vs.channel_id == 3012, "кнопка «Присоединиться» входит в голос");
+    /* Поток голоса демо без звука (g_audio_fake) сперва ставит VS_FAILED с текстом «фиктивное устройство», затем
+     * VS_CONNECTED; в этом окне панель показывает ошибку вместо «канал / сервер». Ждём, пока поток дойдёт до
+     * CONNECTED (до 1 с), — иначе проверки панели ниже зависят от планировщика (было на macOS в CI). */
+    for (int i = 0; i < 50; i++) { voice_status(&vs); if (vs.phase == VS_CONNECTED) break; Waitable w = wake_waitable(g_wake); plat_wait(&w, 1, 20); wake_clear(g_wake); }
     check(on_screen("Голос") || scr_has(&cur, "Подключение"), "внизу колонки каналов — панель голоса");
     check(on_screen("Отключиться") && scr_has(&cur, "Выбрать статус канала"), "на экране канала — «Отключиться», под каналом «Выбрать статус канала»");
     check(scr_grid_ok(&cur, "в голосе") && scr_deco_ok(&cur, "в голосе") && scr_layout_ok(&cur, false, false, "в голосе"), "в голосе: сетка, ASCII, линии колонок");
