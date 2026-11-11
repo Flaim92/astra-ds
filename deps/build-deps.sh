@@ -53,7 +53,14 @@ unpack() { # архив каталог
 
 cmake_static() { # исходники билд-каталог [опции...]
     local s=$1 b=$2; shift 2
-    cmake -S "$s" -B "$b" -G Ninja \
+    # macOS: Homebrew (/usr/local на Intel, /opt/homebrew на arm64) не должен подменять наши библиотеки.
+    # На Intel /usr/local/include — стандартный путь clang: найденный там OpenSSL CMake считает системным и
+    # не передаёт -I, curl собирался с чужими заголовками (ENGINE, OCSP) и не компоновался с нашим libcrypto.
+    local mac=()
+    [ "$OS" = mac ] && mac=(-DCMAKE_IGNORE_PREFIX_PATH="/usr/local;/opt/homebrew" -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF
+        -DOPENSSL_INCLUDE_DIR="$PFX/include" -DOPENSSL_CRYPTO_LIBRARY="$PFX/lib/libcrypto.a"
+        -DOPENSSL_SSL_LIBRARY="$PFX/lib/libssl.a" --no-warn-unused-cli)
+    cmake -S "$s" -B "$b" -G Ninja "${mac[@]}" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$PFX" \
         -DCMAKE_PREFIX_PATH="$PFX" \
@@ -181,6 +188,8 @@ build_curl() {
         -DCURL_DISABLE_SHUFFLE_DNS=ON -DCURL_DISABLE_SOCKETPAIR=OFF -DCURL_DISABLE_OPENSSL_AUTO_LOAD_CONFIG=ON
     # Установка CMake кладёт только заголовки; библиотеку берём из каталога сборки.
     cp "$BLD/curl-b/lib/libcurl.a" "$PFX/lib/libcurl.a"
+    # macOS: OpenSSL должен быть нашим (deps/prefix), а не из Homebrew
+    if [ "$OS" = mac ]; then grep -q "Found OpenSSL: $PFX" "$BLD/curl-b.configure.txt" || { grep 'OpenSSL' "$BLD/curl-b.configure.txt"; echo "curl: чужой OpenSSL"; exit 1; }; fi
     grep -q 'Protocols: http https ws wss$' "$BLD/curl-b.configure.txt" || { grep 'Protocols:' "$BLD/curl-b.configure.txt"; echo "curl: лишние протоколы"; exit 1; }
 }
 
