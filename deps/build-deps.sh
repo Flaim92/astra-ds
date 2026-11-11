@@ -194,8 +194,13 @@ build_curl() {
         # наш OpenSSL собран no-engine (и без OCSP): ссылки на ENGINE_/OCSP_ значат, что заголовки были чужие
         if nm -u "$PFX/lib/libcurl.a" 2>/dev/null | grep -qE '^_(ENGINE_|OCSP_)'; then
             echo "curl: собран с чужими заголовками OpenSSL"
-            ninja -C "$BLD/curl-b" -t commands | grep -m1 'vtls/openssl.c' || true
+            local cmd
+            cmd=$(ninja -C "$BLD/curl-b" -t commands | grep -m1 'vtls/openssl.c' || true)
+            echo "$cmd"
             ls -la /usr/local/include/openssl 2>&1 | head -3; echo "CPATH=${CPATH:-} C_INCLUDE_PATH=${C_INCLUDE_PATH:-} SDKROOT=${SDKROOT:-}"
+            grep -n 'OPENSSL_NO_ENGINE\|OPENSSL_NO_OCSP' "$PFX/include/openssl/configuration.h" || echo "в configuration.h нет OPENSSL_NO_ENGINE/OCSP"
+            # какие заголовки openssl реально подключаются и порядок поиска
+            ( cd "$BLD/curl-b" && eval "${cmd/ -o lib\/CMakeFiles\/libcurl_static.dir\/vtls\/openssl.c.o/ -o /dev/null} -H -v -fsyntax-only" 2>&1 | grep -E 'openssl/(ssl|opensslconf|configuration)\.h|^ /|search starts' | head -20 ) || true
             exit 1
         fi
     fi
