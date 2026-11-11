@@ -2625,12 +2625,17 @@ static void t_packb3(void) {
 /* №15: перевод клавиш окна с Ctrl (чистые функции gui_win.c / gui_x11.c) */
 #ifdef _WIN32
 bool gb_vk_key(unsigned vk, bool ctrl, bool alt, Key *out);
-#else
+#elif !defined(__APPLE__)
 #include <X11/keysym.h>
 bool gb_ks_key(unsigned long base, unsigned long ks, bool alt, Key *out);
 #endif
 static bool kk(bool got, const Key *k, u32 ch) { return got && k->code == K_CHAR && k->ch == ch && k->ctrl && !k->alt; }
 static void t_zoom_keys(void) {
+#ifdef __APPLE__
+    say("  [пропуск] клавиши масштаба окна: на macOS окна пока нет
+");
+    check(!term_zoom(1) && term_zoom_pct() == 100, "№15: без окна (selftest) term_zoom ничего не меняет, масштаб 100 %");
+#else
     Key k;
     bool ok = true;
 #ifdef _WIN32
@@ -2660,6 +2665,7 @@ static void t_zoom_keys(void) {
     snprintf(w, sizeof w, "№15: %s — Ctrl+= / Ctrl+- / Ctrl+0 и цифровой блок дают клавиши масштаба, без Ctrl и с AltGr — нет", where);
     check(ok, w);
     check(!term_zoom(1) && term_zoom_pct() == 100, "№15: без окна (selftest) term_zoom ничего не меняет, масштаб 100 %");
+#endif
 }
 /* Пакет Б: эмодзи серверов, разметка, опросы, эмбеды, ветки, форумы (демо и подставные ответы, без сети) */
 void emoji_test_resp(long status, const char *body);

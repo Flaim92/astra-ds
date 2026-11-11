@@ -12,8 +12,12 @@ mkdir -p "$OUT/obj"
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) OS=win ;;
     Linux) OS=linux ;;
+    Darwin) OS=mac ;;
     *) echo "неизвестная система"; exit 1 ;;
 esac
+# Компилятор: GCC (Windows, Linux); на macOS — системный clang (Xcode Command Line Tools)
+CC=gcc; CXX=g++
+[ "$OS" = mac ] && { CC=clang; CXX=clang++; export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-12.0}; }
 
 WARN="-Wall -Wextra -Werror -Wno-missing-field-initializers -Wshadow -Wformat=2 -Wformat-security"
 HARDEN="-fstack-protector-strong -D_FORTIFY_SOURCE=2"
@@ -29,6 +33,14 @@ if [ "$OS" = win ]; then
     SYSLIBS="-lws2_32 -lcrypt32 -lsecur32 -lbcrypt -ladvapi32 -lole32 -loleaut32 -luuid -lavrt -lwer -lwinmm -liphlpapi -lksuser -luser32 -lgdi32 -ldwmapi -lshell32 -lshlwapi -lwintrust"
     INC="$INC -isystem third_party/webview2"   # WebView2.h (капча при входе, src/captcha.c): официальный заголовок, без -Werror
     EXE=$OUT/astra-ds.exe
+elif [ "$OS" = mac ]; then
+    # macOS: недостающие вызовы Linux — compat_apple.h (подключается к каждому файлу); звук — CoreAudio,
+    # токен — Keychain, окно — gui_mac.c (пока заглушка: терминал)
+    PLAT_SRC="src/plat_posix.c src/audio_coreaudio.c src/gui_mac.c src/gui_grid.c"
+    DEFS="$DEFS -D_GNU_SOURCE -D_DARWIN_C_SOURCE -include src/compat_apple.h"
+    LDFLAGS="-Wl,-dead_strip"
+    SYSLIBS="-framework AudioToolbox -framework CoreAudio -framework CoreFoundation -framework Security -lpthread -lm"
+    EXE=$OUT/astra-ds
 else
     PLAT_SRC="src/plat_posix.c src/audio_alsa.c src/gui_x11.c src/gui_grid.c"
     DEFS="$DEFS -D_GNU_SOURCE"
@@ -67,11 +79,14 @@ for f in $SRC; do
         voice.c|voicefx.c|audio_*.c|streamtest.c|share_x11.c|share_pw.c|golive.c|viddec.c|cam.c|anon.c|gui_grid.c|gui_win.c|gui_x11.c|net.c|xlite_c.c|tls13.c|vless.c|img.c) fo="" ;;
         *) fo="-Os" ;;
     esac
-    gcc $CFLAGS $fo $WARN -c "$f" -o "$o"
+    # KEEP_GOING=1 (CI): собрать все файлы и показать все ошибки, а не только первую
+    if [ "${KEEP_GOING:-0}" = 1 ]; then $CC $CFLAGS $fo $WARN -c "$f" -o "$o" || failed="${failed:-} $f"
+    else $CC $CFLAGS $fo $WARN -c "$f" -o "$o"; fi
     objs+=("$o")
 done
+[ -n "${failed:-}" ] && { echo "== не собрались:$failed"; exit 1; }
 # cJSON — сторонний код: без -Werror, но с теми же флагами защиты
-gcc $CFLAGS -w -c third_party/cJSON.c -o $OUT/obj/cJSON.o
+$CC $CFLAGS -w -c third_party/cJSON.c -o $OUT/obj/cJSON.o
 objs+=("$OUT/obj/cJSON.o")
 # Windows: значок (ID 1), манифест asInvoker и libcurl-impersonate.dll (RCDATA 10) — ресурсом в exe
 if [ "$OS" = win ]; then
@@ -85,6 +100,8 @@ if [ "$OS" = win ]; then
     grep -q 'libcurl-impersonate.dll.gz' "$OUT/obj/astra_gen.rc" || { echo "astra.rc: путь к DLL не заменён"; exit 1; }
     windres -O coff -I src -o $OUT/obj/astra_res.o "$OUT/obj/astra_gen.rc"
     objs+=("$OUT/obj/astra_res.o")
+elif [ "$OS" = mac ]; then
+    :   # macOS: своей сборки libcurl-impersonate пока нет (impcurl.c — вход обычным libcurl)
 else
     # Linux: libcurl-impersonate.so запекается секцией в ELF (символы _binary_libcurl_impersonate_so_*).
     # cd в каталог, чтобы имя символа было чистым (без путей сборки). Грузится в impcurl.c через memfd+dlopen.
@@ -105,9 +122,10 @@ VIDLIBS=""
 # камера: своя копия libjpeg-turbo с SIMD (deps build_jpegcam, символы camj_*); картинки — обычная -ljpeg
 [ "${VIDEO:-0}" = 1 ] && [ -f "$PFX/lib/libjpegcam.a" ] && VIDLIBS="$VIDLIBS -ljpegcam"
 DEPLIBS="-L$PFX/lib $XLITE_LIB $VIDLIBS -ldave -lmlspp -lhpke -lbytes -ltls_syntax -lcurl -lopus -lspeexdsp -lrnnoise -ljpeg"
-if [ "$OS" = linux ]; then DEPLIBS="$DEPLIBS -lssl"; fi
+if [ "$OS" != win ]; then DEPLIBS="$DEPLIBS -lssl"; fi
 DEPLIBS="$DEPLIBS -lcrypto -lz"
-g++ -o "$EXE" "${objs[@]}" $LDFLAGS $DEPLIBS $SYSLIBS
+$CXX -o "$EXE" "${objs[@]}" $LDFLAGS $DEPLIBS $SYSLIBS
+[ "$OS" = mac ] && strip -x "$EXE"             # macOS: ld64 без -s, локальные символы — strip
 # Windows: .rodata (константы ассемблера OpenSSL) компоновщик помечает записываемой — тогда она в частной памяти
 # процесса всегда (~190 КБ). Константы никто не пишет: помечаем только для чтения.
 if [ "$OS" = win ]; then objcopy --set-section-flags .rodata=alloc,load,readonly,data,contents "$EXE"; fi

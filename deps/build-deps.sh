@@ -12,11 +12,26 @@ SRC=$DEPS/src
 BLD=$DEPS/build
 PFX=$DEPS/prefix
 mkdir -p "$SRC" "$BLD" "$PFX"
-JOBS=$(nproc)
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) OS=win; MAKE=mingw32-make ;;
+    Darwin) OS=mac; MAKE=make ;;
     *) OS=linux; MAKE=make ;;
 esac
+if [ "$OS" = mac ]; then
+    # macOS: скрипт рассчитан на GNU sed и sha256sum (brew install gnu-sed coreutils); компилятор — clang
+    for g in gnu-sed coreutils; do
+        d=$(brew --prefix "$g" 2>/dev/null)/libexec/gnubin
+        [ -d "$d" ] && PATH="$d:$PATH"
+    done
+    sed --version > /dev/null 2>&1 || { echo "нужен GNU sed: brew install gnu-sed coreutils"; exit 1; }
+    command -v sha256sum > /dev/null || { echo "нужен sha256sum: brew install coreutils"; exit 1; }
+    export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-12.0}
+    export CC=clang CXX=clang++
+    gcc() { clang "$@"; }                      # сборка мелких библиотек ниже вызывает gcc напрямую
+    JOBS=$(sysctl -n hw.ncpu)
+else
+    JOBS=$(nproc)
+fi
 
 # Общие флаги защиты и размера для всего, что попадает в .exe.
 HARDEN="-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -ffunction-sections -fdata-sections"
@@ -114,6 +129,10 @@ PM
     # Windows: только libcrypto (TLS делает Schannel). Linux: ещё libssl для TLS в curl.
     local target=mingw64 tls="no-ssl no-tls no-sock"
     [ "$OS" = linux ] && { target=linux-x86_64; tls="no-ssl3 no-tls1 no-tls1_1"; }
+    if [ "$OS" = mac ]; then
+        tls="no-ssl3 no-tls1 no-tls1_1"
+        case "$(uname -m)" in arm64) target=darwin64-arm64-cc ;; *) target=darwin64-x86_64-cc ;; esac
+    fi
     perl Configure $target no-shared no-module no-dso no-engine no-apps no-docs no-tests \
         no-ui-console no-legacy no-deprecated $tls no-dtls no-quic no-srtp no-ct \
         no-cms no-ts no-comp no-autoload-config no-http \
@@ -429,7 +448,7 @@ build_ffmpeg() {
     [ "$(grep -c 'film_grain_dbp' "$h274")" = 3 ] || { echo "ffmpeg: патч h274 не применился"; exit 1; }
     local asm=--disable-x86asm extra=""
     command -v nasm > /dev/null && asm=--enable-x86asm
-    [ "$OS" = linux ] && extra="--enable-pic"
+    [ "$OS" != win ] && extra="--enable-pic"
     mkdir -p "$BLD/tmp"                          # TMPDIR Windows (C:\...) configure не понимает
     ( cd "$BLD/ffmpeg" && export TMPDIR="$BLD/tmp" && ./configure --prefix="$PFX" --libdir="$PFX/lib" --incdir="$PFX/include" \
         --enable-static --disable-shared --disable-everything --disable-autodetect --disable-programs --disable-doc \

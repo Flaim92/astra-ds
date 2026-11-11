@@ -1,0 +1,84 @@
+# Сборка и самопроверка Astra DS на macOS (Apple Silicon и Intel). Запуск — вручную или при push в ветку macos.
+name: macos
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [macos]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Инструменты
+        run: brew install ninja gnu-sed coreutils
+
+      - name: Кэш зависимостей
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps/prefix
+            deps/src
+          key: deps-macos-${{ matrix.arch }}-${{ hashFiles('deps/build-deps.sh') }}
+
+      - name: Зависимости
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash deps/build-deps.sh zlib openssl curl opus speexdsp rnnoise json mlspp libdave jpeg brotli
+
+      - name: Сборка
+        run: KEEP_GOING=1 bash build.sh
+
+      - name: Файл программы
+        run: |
+          file build/astra-ds
+          ls -l build/astra-ds
+          otool -L build/astra-ds
+
+      - name: Самопроверка
+        run: |
+          rc=0
+          ./build/astra-ds --selftest > selftest.txt 2>&1 || rc=1
+          grep -E "FAIL|ДЕФЕКТ|Итог|частная память" selftest.txt || true
+          tail -5 selftest.txt
+          echo "--- шлюз Discord (поддельный токен)"
+          ./build/astra-ds --gwtest || rc=1
+          echo "--- связка ключей"
+          ./build/astra-ds --keyringtest || echo "keyringtest: код $? (в CI связка ключей может быть недоступна)"
+          exit $rc
+
+      - name: Отчёт самопроверки
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-macos-${{ matrix.arch }}
+          path: selftest.txt
+          if-no-files-found: ignore
+
+      - name: Архив
+        run: |
+          mkdir -p out/astra-ds
+          cp build/astra-ds out/astra-ds/
+          cp LICENSE out/astra-ds/LICENSE.txt
+          cp third_party/LICENSE out/astra-ds/LICENSE-third-party.txt
+          tar -C out -czf astra-ds-macos-${{ matrix.arch }}.tar.gz astra-ds
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-ds-macos-${{ matrix.arch }}
+          path: astra-ds-macos-${{ matrix.arch }}.tar.gz
