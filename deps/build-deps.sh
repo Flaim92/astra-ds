@@ -61,8 +61,7 @@ unpack() { # архив каталог
 cmake_static() { # исходники билд-каталог [опции...]
     local s=$1 b=$2; shift 2
     # macOS: Homebrew (/usr/local на Intel, /opt/homebrew на arm64) не должен подменять наши библиотеки.
-    # На Intel /usr/local/include — стандартный путь clang: найденный там OpenSSL CMake считает системным и
-    # не передаёт -I, curl собирался с чужими заголовками (ENGINE, OCSP) и не компоновался с нашим libcrypto.
+    # Пути к OpenSSL — явно. Порядок заголовков (свой prefix раньше /usr/local/include) — в CFLAGS выше.
     local mac=()
     [ "$OS" = mac ] && mac=(-DCMAKE_IGNORE_PREFIX_PATH="/usr/local;/opt/homebrew" -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF
         -DOPENSSL_INCLUDE_DIR="$PFX/include" -DOPENSSL_CRYPTO_LIBRARY="$PFX/lib/libcrypto.a"
