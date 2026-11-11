@@ -354,7 +354,11 @@ static bool on_screen(const char *s) { cur_take(); return scr_has(&cur, s); }
 static bool click_ex(const char *label, int button, int dx, bool rev) {
     cur_take();
     int x, y;
-    if (!scr_find_ex(&cur, label, &x, &y, rev)) { say("    не найдено на экране %dx%d: %s\n", CW, CH, label); return false; }
+    if (!scr_find_ex(&cur, label, &x, &y, rev)) {
+        say("    не найдено на экране %dx%d: %s\n", CW, CH, label);
+        for (int r = CH - 6; r < CH; r++) say("      |%s\n", scr_line(&cur, r));   /* низ экрана: панель голоса, подсказки */
+        return false;
+    }
     mouse_at(button, x + dx, y);
     return true;
 }
