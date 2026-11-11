@@ -38,6 +38,13 @@ HARDEN="-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -ffunction-sections -fd
 [ "$OS" = linux ] && HARDEN="$HARDEN -fPIC"   # статические библиотеки внутри PIE
 export CFLAGS="$HARDEN"
 export CXXFLAGS="$HARDEN"
+# macOS: Apple clang ищет /usr/local/include РАНЬШЕ каталогов -isystem, а CMake подключает найденные библиотеки
+# через -isystem. На Intel там Homebrew (openssl@3 и др.): curl собирался с чужими заголовками OpenSSL.
+# Каталоги -I идут раньше /usr/local/include — свой prefix первым.
+if [ "$OS" = mac ]; then
+    export CFLAGS="$CFLAGS -I$PFX/include"
+    export CXXFLAGS="$CXXFLAGS -I$PFX/include"
+fi
 
 fetch() { # файл url sha256
     local f=$SRC/$1
