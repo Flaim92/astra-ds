@@ -41,7 +41,7 @@ export CXXFLAGS="$HARDEN"
 
 fetch() { # файл url sha256
     local f=$SRC/$1
-    [ -f "$f" ] || curl -fsSL --proto '=https' --retry 3 -o "$f.part" "$2" && { [ -f "$f" ] || mv "$f.part" "$f"; }
+    [ -f "$f" ] || curl -fsSL --proto '=https' --retry 5 --retry-all-errors -o "$f.part" "$2" && { [ -f "$f" ] || mv "$f.part" "$f"; }
     echo "$3  $f" | sha256sum -c --quiet - || { echo "ХЭШ НЕ СОВПАЛ: $1"; rm -f "$f"; exit 1; }
 }
 
@@ -229,7 +229,8 @@ build_rnnoise() {
     local b=$BLD/rnnoise o=$BLD/rnnoise-o
     rm -rf "$o"; mkdir -p "$o"
     for f in denoise rnn pitch kiss_fft celt_lpc nnet nnet_default parse_lpcnet_weights rnnoise_data rnnoise_tables; do
-        gcc $CFLAGS -std=gnu11 -I"$b/include" -I"$b/src" -c "$b/src/$f.c" -o "$o/$f.o"
+        # DISABLE_NEON: на ARM (Apple Silicon) — тот же переносимый C (NEON-вариант ждёт os_support.h, которого нет в архиве)
+        gcc $CFLAGS -std=gnu11 -DDISABLE_NEON -I"$b/include" -I"$b/src" -c "$b/src/$f.c" -o "$o/$f.o"
     done
     rm -f "$PFX/lib/librnnoise.a"
     ar rcs "$PFX/lib/librnnoise.a" "$o"/*.o

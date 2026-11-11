@@ -30,7 +30,7 @@ jobs:
 
       - name: Кэш зависимостей
         id: cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             deps/prefix
@@ -40,6 +40,16 @@ jobs:
       - name: Зависимости
         if: steps.cache.outputs.cache-hit != 'true'
         run: bash deps/build-deps.sh zlib openssl curl opus speexdsp rnnoise json mlspp libdave jpeg brotli
+
+      # кэш сохраняется сразу: следующий прогон не пересобирает зависимости, даже если упала сборка программы
+      - name: Сохранить кэш зависимостей
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            deps/prefix
+            deps/src
+          key: deps-macos-${{ matrix.arch }}-${{ hashFiles('deps/build-deps.sh') }}
 
       - name: Сборка
         run: KEEP_GOING=1 bash build.sh

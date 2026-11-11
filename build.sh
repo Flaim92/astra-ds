@@ -36,10 +36,11 @@ if [ "$OS" = win ]; then
 elif [ "$OS" = mac ]; then
     # macOS: недостающие вызовы Linux — compat_apple.h (подключается к каждому файлу); звук — CoreAudio,
     # токен — Keychain, окно — gui_mac.c (пока заглушка: терминал)
-    PLAT_SRC="src/plat_posix.c src/audio_coreaudio.c src/gui_mac.c src/gui_grid.c"
+    PLAT_SRC="src/plat_posix.c src/audio_coreaudio.c src/gui_mac.m src/gui_grid.c src/captcha_mac.m"   # MAC_TERM=1 — без окна: gui_mac.c
     DEFS="$DEFS -D_GNU_SOURCE -D_DARWIN_C_SOURCE -include src/compat_apple.h"
     LDFLAGS="-Wl,-dead_strip"
-    SYSLIBS="-framework AudioToolbox -framework CoreAudio -framework CoreFoundation -framework Security -lpthread -lm"
+    SYSLIBS="-framework AudioToolbox -framework CoreAudio -framework CoreFoundation -framework Security -framework AppKit -framework Foundation -framework Network -framework CoreGraphics -framework QuartzCore -framework CoreText -lpthread -lm"
+    [ "${MAC_TERM:-0}" = 1 ] && PLAT_SRC=${PLAT_SRC/gui_mac.m/gui_mac.c}
     EXE=$OUT/astra-ds
 else
     PLAT_SRC="src/plat_posix.c src/audio_alsa.c src/gui_x11.c src/gui_grid.c"
@@ -57,7 +58,12 @@ if [ "${VIDEO:-0}" = 1 ]; then
     [ -f src/anon.c ] && DEFS="$DEFS -DASTRA_ANON"   # анонимизация камеры (скрытие глаз), src/anon.c
 fi
 SRC="src/util.c src/update.c src/secret.c src/net.c src/store.c src/ui.c src/cli.c src/voice.c src/voicefx.c src/panic.c src/vless.c src/img.c src/login.c src/captcha.c src/impcurl.c src/demo.c src/selftest.c src/main.c $PLAT_SRC"
-[ "${VIDEO:-0}" = 1 ] && SRC="$SRC src/streamtest.c src/share_x11.c src/share_pw.c src/golive.c src/viddec.c src/cam.c src/anon.c"      # обычная сборка его не компилирует вовсе; cam.c — камера (Media Foundation подгружается при первом обращении, в зависимости exe не входит; Linux — V4L2)
+if [ "${VIDEO:-0}" = 1 ] && [ "$OS" = mac ]; then
+    # macOS: демонстрация экрана — пока отказ (share_mac.c, там же кодер minih264); камера — AVFoundation (cam_mac.m)
+    SRC="$SRC src/streamtest.c src/share_mac.c src/golive.c src/viddec.c src/cam.c src/cam_mac.m src/anon.c"
+    DEFS="$DEFS -DASTRA_CAM_MAC"
+    SYSLIBS="$SYSLIBS -framework AVFoundation -framework CoreMedia -framework CoreVideo"
+elif [ "${VIDEO:-0}" = 1 ]; then SRC="$SRC src/streamtest.c src/share_x11.c src/share_pw.c src/golive.c src/viddec.c src/cam.c src/anon.c"; fi      # обычная сборка его не компилирует вовсе; cam.c — камера (Media Foundation подгружается при первом обращении, в зависимости exe не входит; Linux — V4L2)
 [ "${VIDEO:-0}" = 1 ] && [ "$OS" = linux ] && SRC="$SRC src/portal_wl.c"   # Wayland: xdg-desktop-portal ScreenCast (libdbus через dlopen)
 # Туннель VLESS: VLESS_IMPL=c (по умолчанию) — свой на C (src/xlite_c.c + src/tls13.c, декодер brotli
 # для сжатых сертификатов), без среды Go; VLESS_IMPL=go — libxlite.a (Xray-core на Go, tools/xlite).
@@ -72,16 +78,19 @@ CFLAGS="-std=gnu11 $OPT $HARDEN $DEFS $INC"
 objs=()
 for f in $SRC; do
     [ -f "$f" ] || { echo "нет $f — пропуск"; continue; }
-    o=$OUT/obj/$(basename "${f%.c}").o
+    o=$OUT/obj/$(basename "${f%.*}").o
     # горячий путь (звук, видео, отрисовка окна, туннель, шлюз) — -O2; остальное (интерфейс, вход, хранилище,
     # проверки) — -Os: меньше кода в памяти, скорость там не видна. Последний -O побеждает.
     case "$(basename "$f")" in
-        voice.c|voicefx.c|audio_*.c|streamtest.c|share_x11.c|share_pw.c|golive.c|viddec.c|cam.c|anon.c|gui_grid.c|gui_win.c|gui_x11.c|net.c|xlite_c.c|tls13.c|vless.c|img.c) fo="" ;;
+        voice.c|voicefx.c|audio_*.c|streamtest.c|share_x11.c|share_pw.c|share_mac.c|cam_mac.m|gui_mac.m|golive.c|viddec.c|cam.c|anon.c|gui_grid.c|gui_win.c|gui_x11.c|net.c|xlite_c.c|tls13.c|vless.c|img.c) fo="" ;;
         *) fo="-Os" ;;
     esac
     # KEEP_GOING=1 (CI): собрать все файлы и показать все ошибки, а не только первую
-    if [ "${KEEP_GOING:-0}" = 1 ]; then $CC $CFLAGS $fo $WARN -c "$f" -o "$o" || failed="${failed:-} $f"
-    else $CC $CFLAGS $fo $WARN -c "$f" -o "$o"; fi
+    # Objective-C (macOS: окно, капча, камера) — с ARC и без compat_apple.h (его макросы не для заголовков Cocoa)
+    ff="$CFLAGS"
+    case "$f" in *.m) ff="-fobjc-arc ${CFLAGS/-include src\/compat_apple.h/}"; ff=${ff/-std=gnu11/} ;; esac
+    if [ "${KEEP_GOING:-0}" = 1 ]; then $CC $ff $fo $WARN -c "$f" -o "$o" || failed="${failed:-} $f"
+    else $CC $ff $fo $WARN -c "$f" -o "$o"; fi
     objs+=("$o")
 done
 [ -n "${failed:-}" ] && { echo "== не собрались:$failed"; exit 1; }

@@ -43,6 +43,9 @@ extern char **environ;
 
 /* ---------- ожидание ---------- */
 void plat_wait(const Waitable *w, int n, int timeout_ms) {
+#ifdef __APPLE__
+    if (gb_wait(w, n, timeout_ms)) return;      /* окно Cocoa: ждать в ран-лупе (события окна видит только он) */
+#endif
     struct pollfd p[32];
     int k = 0;
     for (int i = 0; i < n && k < 32; i++) if (w[i].h >= 0) p[k++] = (struct pollfd){ (int)w[i].h, w[i].ev ? w[i].ev : POLLIN, 0 };

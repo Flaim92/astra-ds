@@ -15,6 +15,7 @@ int gb_fine_scale(void) { return 0; }
 bool gb_zoom(int step) { (void)step; return false; }
 int gb_fullscreen(int mode) { (void)mode; return -1; }
 int gb_zoom_pct(void) { return 100; }
+bool gb_wait(const Waitable *w, int n, int timeout_ms) { (void)w; (void)n; (void)timeout_ms; return false; }   /* окна нет: обычный poll */
 #ifdef ASTRA_VIDEO
 bool gb_video_ok(void) { return false; }
 void gb_cell_px(int *cw, int *ch) { *cw = 8; *ch = 16; }
