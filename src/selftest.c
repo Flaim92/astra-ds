@@ -2630,7 +2630,9 @@ bool gb_vk_key(unsigned vk, bool ctrl, bool alt, Key *out);
 #include <X11/keysym.h>
 bool gb_ks_key(unsigned long base, unsigned long ks, bool alt, Key *out);
 #endif
+#ifndef __APPLE__   /* на macOS проверка пропускается, помощник не нужен */
 static bool kk(bool got, const Key *k, u32 ch) { return got && k->code == K_CHAR && k->ch == ch && k->ctrl && !k->alt; }
+#endif
 static void t_zoom_keys(void) {
 #ifdef __APPLE__
     say("  [пропуск] клавиши масштаба окна: на macOS окна пока нет\n");
