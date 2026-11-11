@@ -379,7 +379,14 @@ build_jpegcam() {
     # Только libjpeg API, статически: без TurboJPEG API, утилит, тестов, арифметического кодирования.
     fetch libjpeg-turbo-3.2.1.tar.gz https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.1/libjpeg-turbo-3.2.1.tar.gz \
         c27ad72a68da151177929aa969ae773a2da5ac2af9ce946079314fdac8cece7f
-    command -v nasm > /dev/null || { echo "jpegcam: нужен nasm (SIMD)"; exit 1; }
+    # macOS: символы Mach-O с префиксом «_», переименование — llvm-objcopy (brew install llvm); arm64 — NEON без nasm
+    local us="" objcopy=objcopy
+    if [ "$OS" = mac ]; then
+        us=_
+        objcopy="$(brew --prefix llvm 2>/dev/null)/bin/llvm-objcopy"
+        [ -x "$objcopy" ] || { echo "jpegcam: нужен llvm-objcopy (brew install llvm)"; exit 1; }
+    fi
+    [ "$OS" = mac ] && [ "$(uname -m)" = arm64 ] || command -v nasm > /dev/null || { echo "jpegcam: нужен nasm (SIMD)"; exit 1; }
     unpack libjpeg-turbo-3.2.1.tar.gz jpegcam
     local inst=$BLD/jpegcam-inst
     rm -rf "$inst" "$BLD/jpegcam-b"
@@ -391,13 +398,17 @@ build_jpegcam() {
     # (MinGW: .refptr.<имя> — общие COMDAT-указатели; для своих имён тоже переименовываются, иначе компоновщик слил бы
     # указатель второй копии с указателем первой)
     nm -g --defined-only "$inst/lib/libjpeg.a" | awk 'NF >= 3 && $2 ~ /^[A-Z]$/ { print $3 }' | sort -u > "$BLD/jpegcam-all.txt"
-    grep -E '^[A-Za-z_][A-Za-z0-9_]*$' "$BLD/jpegcam-all.txt" | grep -vE '^__' > "$BLD/jpegcam-syms.txt"
+    if [ "$OS" = mac ]; then   # имена C в Mach-O — «_имя»: в список идут без префикса
+        grep -E '^_[A-Za-z][A-Za-z0-9_]*$' "$BLD/jpegcam-all.txt" | sed 's/^_//' > "$BLD/jpegcam-syms.txt"
+    else
+        grep -E '^[A-Za-z_][A-Za-z0-9_]*$' "$BLD/jpegcam-all.txt" | grep -vE '^__' > "$BLD/jpegcam-syms.txt"
+    fi
     [ -s "$BLD/jpegcam-syms.txt" ]
     {
-        awk '{ print $1 " camj_" $1 }' "$BLD/jpegcam-syms.txt"
-        awk '{ print ".refptr." $1 " .refptr.camj_" $1 }' "$BLD/jpegcam-syms.txt"
+        awk -v u="$us" '{ print u $1 " " u "camj_" $1 }' "$BLD/jpegcam-syms.txt"
+        [ "$OS" = mac ] || awk '{ print ".refptr." $1 " .refptr.camj_" $1 }' "$BLD/jpegcam-syms.txt"
     } > "$BLD/jpegcam-redef.txt"
-    objcopy --redefine-syms="$BLD/jpegcam-redef.txt" "$inst/lib/libjpeg.a" "$PFX/lib/libjpegcam.a"
+    "$objcopy" --redefine-syms="$BLD/jpegcam-redef.txt" "$inst/lib/libjpeg.a" "$PFX/lib/libjpegcam.a"
     rm -rf "$PFX/include/jpegcam"; mkdir -p "$PFX/include/jpegcam"
     cp "$inst"/include/{jconfig.h,jerror.h,jmorecfg.h,jpeglib.h} "$PFX/include/jpegcam/"
     {
@@ -410,7 +421,7 @@ build_jpegcam() {
         echo "#endif"
     } > "$PFX/include/jpegcam/camj.h"
     # проверка: в переименованной библиотеке не осталось определённого jpeg_* (иначе — конфликт с копией img.c)
-    ! nm -g --defined-only "$PFX/lib/libjpegcam.a" | awk 'NF >= 3 { print $3 }' | grep -qE '^(jpeg_|jsimd_|jinit_)'
+    ! nm -g --defined-only "$PFX/lib/libjpegcam.a" | awk 'NF >= 3 { print $3 }' | grep -qE "^${us}(jpeg_|jsimd_|jinit_)"
 }
 
 build_brotli() {
@@ -448,6 +459,7 @@ build_dav1d() {
     py=$(command -v python3 || command -v python)
     [ "$OS" = win ] && py=$(command -v python)   # python3 в Windows — заглушка магазина
     command -v nasm > /dev/null && asm=true
+    [ "$OS" = mac ] && [ "$(uname -m)" = arm64 ] && asm=true   # macOS arm64: NEON собирает clang, nasm не нужен
     rm -rf "$BLD/dav1d-b"
     ( cd "$BLD/dav1d" && "$py" "$BLD/meson/meson.py" setup "$BLD/dav1d-b" --prefix="$PFX" --libdir=lib \
         --buildtype=release -Db_ndebug=true -Ddefault_library=static -Denable_tools=false -Denable_tests=false \
