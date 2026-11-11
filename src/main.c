@@ -150,6 +150,7 @@ static const char USAGE[] =
     "  --version         версия программы\n"
     "  --hq              качество голоса выше (Opus 64 кбит/с, сложность 8) ценой процессора\n"
     "  --mic=ИМЯ         микрофон (часть имени устройства)\n"
+    "  --mic-gain=N      громкость микрофона в процентах (0..400, по умолчанию 100)\n"
     "  --out=ИМЯ         устройство вывода (часть имени)\n"
     "  --devices         показать звуковые устройства и выйти\n"
     "  --shot=ФАЙЛ.bmp   с --demo: снимок окна в BMP без показа окна; --shot-keys=\"шаги\" - сценарий\n"
@@ -746,6 +747,7 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "--captcha-helper")) return captcha_helper_main(argc, argv);
 #endif
     bool list_devices = false, tui = false;
+    int mic_gain_cli = -1;                       /* --mic-gain: поверх сохранённой громкости */
     const char *vlesstest = NULL, *shot = NULL, *shot_keys = NULL;
     int hold = 0, lang_force = -1;
     for (int i = 1; i < argc; i++) {
@@ -822,6 +824,7 @@ int main(int argc, char **argv) {
         }
 #endif
         else if (arg_is(a, "--hq", NULL)) O.hq = true;
+        else if (arg_is(a, "--mic-gain", &v) && v) mic_gain_cli = atoi(v);
         else if (arg_is(a, "--mic", &v) && v) O.mic = v;
         else if (arg_is(a, "--out", &v) && v) O.out = v;
         else if (arg_is(a, "--devices", NULL)) list_devices = true;
@@ -869,6 +872,7 @@ int main(int argc, char **argv) {
         cred_delete();
         vless_forget();
         keyring_delete("startup");               /* «больше не спрашивать» — тоже */
+        keyring_delete("voice");                 /* настройки голоса */
         keyring_delete("update-checked");        /* дата проверки обновлений (АО-5) */
         keyring_delete("upd_told");              /* разовое уведомление об автопроверке */
         secret_destroy();
@@ -922,6 +926,8 @@ int main(int argc, char **argv) {
     }
     g_wake = wake_new();
     voice_init();
+    voice_settings_load();                       /* громкость, устройства, порог и прочее — из хранилища */
+    if (mic_gain_cli >= 0) voice_mic_gain_set(mic_gain_cli);   /* --mic-gain важнее сохранённого */
     /* --cli: ни сырого режима, ни альтернативного экрана — обычные строки (и конвейер) */
     if (O.cli) cli_init();
     else {
@@ -953,6 +959,7 @@ int main(int argc, char **argv) {
 
     while (!g_quit) loop_once(INT64_MAX);
 
+    voice_settings_flush();                      /* изменения последних 1,5 с */
     voice_shutdown();
     vless_stop();                               /* погасить Xray и затереть ключ до остального */
     if (O.cli) cli_shutdown(); else term_shutdown();

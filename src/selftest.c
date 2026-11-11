@@ -2808,6 +2808,68 @@ static void t_audio_dev(void) {
     snprintf(d, sizeof d, "  (вывод: %d, микрофонов: %d)\n", no, ni);
     term_puts(d);
     check(no >= -1 && ni >= -1 && ok_names, "№140: audio_devices — имена без управляющих символов (или -1 без звука)");
+    {   /* громкость микрофона: 200 % удваивает тихое, громкое не обрезается, 0 % — тишина, 100 % — без изменений */
+        int16_t s[4] = { 1000, -1000, 30000, -30000 };
+        voice_mic_gain_set(200);
+        voice_mic_gain_apply(s, 4);
+        bool a = s[0] >= 1990 && s[0] <= 2010 && s[1] <= -1990 && s[2] > 30000 && s[3] < -30000;   /* громкое выросло, но в пределах int16 (без переполнения знака) */
+        int16_t z[2] = { 1234, -4321 };
+        voice_mic_gain_set(0);
+        voice_mic_gain_apply(z, 2);
+        int16_t u[2] = { 1234, -4321 };
+        voice_mic_gain_set(100);
+        voice_mic_gain_apply(u, 2);
+        voice_mic_gain_set(999);
+        bool clamp = voice_mic_gain() == 400;
+        voice_mic_gain_set(100);
+        check(a && !z[0] && !z[1] && u[0] == 1234 && u[1] == -4321 && clamp, "громкость микрофона: 200 % вдвое громче без обрезки, 0 % тишина, 100 % как есть, предел 400 %");
+    }
+    {   /* настройки голоса для хранилища: запись и обратное чтение; испорченное и чужое не применяется */
+        static char vb[2600];
+        int vad0 = voice_vad_db();
+        voice_mic_gain_set(150);
+        voice_vad_adjust(-40 - vad0);
+        voice_ns_set(2);
+        voice_hpf(false);
+        voice_set_volume(4242, 0.5f);
+        voice_set_device(0, "Микрофон X");
+        int n = voice_settings_format(vb, sizeof vb);
+        voice_mic_gain_set(100);
+        voice_vad_adjust(-45 - voice_vad_db());
+        voice_ns_set(0);
+        voice_hpf(true);
+        voice_set_volume(4242, 1.0f);
+        voice_set_device(0, "");
+        bool rd = voice_settings_parse(vb);
+        bool back = n > 0 && rd && voice_mic_gain() == 150 && voice_vad_db() == -40 && voice_ns_mode() == 2 && !voice_hpf_on() &&
+                    voice_get_volume(4242) > 0.49f && voice_get_volume(4242) < 0.51f && !strcmp(voice_device(0), "Микрофон X");
+        voice_mic_gain_set(100);
+        voice_hpf(true);
+        voice_set_device(0, "");
+        bool junk = voice_settings_parse("astra-voice 1\ngain=9999\nvad=abc\nns=7\nv=0:50\nv=77:900\nmic=\x01x\nzzz\n") &&
+                    voice_mic_gain() == 100 && voice_ns_mode() == 2 && voice_get_volume(77) == 1.0f && !strcmp(voice_device(0), "");
+        bool head = !voice_settings_parse("gain=10\n") && voice_mic_gain() == 100;
+        voice_ns_set(0);
+        voice_set_volume(4242, 1.0f);
+        voice_vad_adjust(vad0 - voice_vad_db());
+        check(back && junk && head, "настройки голоса: громкость микрофона, порог, шумоподавление, фильтр, громкость собеседника и устройство записываются и читаются обратно; мусор и чужая запись не применяются");
+    }
+#if !defined(_WIN32) && !defined(__APPLE__)
+    {   /* ALSA: служебные PCM не попадают в выбор; вывод стартует с 10 мс в буфере (PipeWire: раньше не стартовал) */
+        bool audio_alsa_name_ok(const char *name);
+        long audio_alsa_start_threshold(const char *name);
+        bool f = !audio_alsa_name_ok("null") && !audio_alsa_name_ok("default") && !audio_alsa_name_ok("dmix:CARD=PCH,DEV=0") &&
+                 !audio_alsa_name_ok("hw:CARD=PCH,DEV=0") && !audio_alsa_name_ok("surround51:CARD=PCH,DEV=0") &&
+                 !audio_alsa_name_ok("lavrate") && !audio_alsa_name_ok("pipewirex") &&
+                 audio_alsa_name_ok("pipewire") && audio_alsa_name_ok("pulse") && audio_alsa_name_ok("sysdefault:CARD=PCH") &&
+                 audio_alsa_name_ok("plughw:CARD=PCH,DEV=0") && audio_alsa_name_ok("front:CARD=PCH,DEV=0");
+        check(f, "ALSA: в выборе устройств нет null, dmix, hw:, surround и частотных плагинов; pipewire, pulse, sysdefault, plughw есть");
+        long th = audio_alsa_start_threshold("null");   /* null есть в любой ALSA, звуковая карта не нужна */
+        char b[160];
+        snprintf(b, sizeof b, "ALSA: порог старта вывода %ld кадров (нужно 1..480, не размер буфера)", th);
+        check(th >= 1 && th <= 480, b);
+    }
+#endif
     voice_set_device(0, "Тестовый микрофон");
     bool set_ok = !strcmp(voice_device(0), "Тестовый микрофон") && !strcmp(voice_device(1), "");
     voice_set_device(0, "");

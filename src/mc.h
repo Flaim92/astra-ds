@@ -779,6 +779,16 @@ void voice_mic_test(bool on);
 /* №143 фильтр микрофона: срез ниже 90 Гц (гул, стук по столу) — до шумоподавления/порога и Opus; по умолчанию вкл. */
 void voice_hpf(bool on);
 bool voice_hpf_on(void);
+/* громкость микрофона 0..400 % (по умолчанию 100; --mic-gain=N); выше 100 — с мягким ограничением */
+void voice_mic_gain_set(int pct);
+int voice_mic_gain(void);
+void voice_mic_gain_apply(int16_t *s, int n);
+/* настройки голоса в системном хранилище (запись "voice"): загрузка при старте, запись при изменении и выходе */
+void voice_settings_load(void);
+void voice_settings_flush(void);
+void voice_settings_forget(void);               /* паника, --logout */
+int voice_settings_format(char *b, size_t cap); /* самопроверка */
+bool voice_settings_parse(const char *s);
 void voice_duck_others(bool on);                /* приглушать другие программы в звонке (по умолчанию нет) */
 bool voice_duck_others_on(void);
 /* №145 звуки звонка — синтез (без файлов): звонок (повторяется до sound_stop), вход/выход, микрофон вкл/выкл,
