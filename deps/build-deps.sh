@@ -189,7 +189,16 @@ build_curl() {
     # Установка CMake кладёт только заголовки; библиотеку берём из каталога сборки.
     cp "$BLD/curl-b/lib/libcurl.a" "$PFX/lib/libcurl.a"
     # macOS: OpenSSL должен быть нашим (deps/prefix), а не из Homebrew
-    if [ "$OS" = mac ]; then grep -q "Found OpenSSL: $PFX" "$BLD/curl-b.configure.txt" || { grep 'OpenSSL' "$BLD/curl-b.configure.txt"; echo "curl: чужой OpenSSL"; exit 1; }; fi
+    if [ "$OS" = mac ]; then
+        grep -q "Found OpenSSL: $PFX" "$BLD/curl-b.configure.txt" || { grep 'OpenSSL' "$BLD/curl-b.configure.txt"; echo "curl: чужой OpenSSL"; exit 1; }
+        # наш OpenSSL собран no-engine (и без OCSP): ссылки на ENGINE_/OCSP_ значат, что заголовки были чужие
+        if nm -u "$PFX/lib/libcurl.a" 2>/dev/null | grep -qE '^_(ENGINE_|OCSP_)'; then
+            echo "curl: собран с чужими заголовками OpenSSL"
+            ninja -C "$BLD/curl-b" -t commands | grep -m1 'vtls/openssl.c' || true
+            ls -la /usr/local/include/openssl 2>&1 | head -3; echo "CPATH=${CPATH:-} C_INCLUDE_PATH=${C_INCLUDE_PATH:-} SDKROOT=${SDKROOT:-}"
+            exit 1
+        fi
+    fi
     grep -q 'Protocols: http https ws wss$' "$BLD/curl-b.configure.txt" || { grep 'Protocols:' "$BLD/curl-b.configure.txt"; echo "curl: лишние протоколы"; exit 1; }
 }
 
