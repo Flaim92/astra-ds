@@ -39,7 +39,7 @@ elif [ "$OS" = mac ]; then
     PLAT_SRC="src/plat_posix.c src/audio_coreaudio.c src/gui_mac.m src/gui_grid.c src/captcha_mac.m"   # MAC_TERM=1 — без окна: gui_mac.c
     DEFS="$DEFS -D_GNU_SOURCE -D_DARWIN_C_SOURCE -include src/compat_apple.h"
     LDFLAGS="-Wl,-dead_strip"
-    SYSLIBS="-framework AudioToolbox -framework CoreAudio -framework CoreFoundation -framework Security -framework AppKit -framework Foundation -framework Network -framework CoreGraphics -framework QuartzCore -framework CoreText -lpthread -lm"
+    SYSLIBS="-framework AudioToolbox -framework CoreAudio -framework CoreFoundation -framework Security -framework SystemConfiguration -framework AppKit -framework Foundation -framework Network -framework CoreGraphics -framework QuartzCore -framework CoreText -lpthread -lm"
     [ "${MAC_TERM:-0}" = 1 ] && PLAT_SRC=${PLAT_SRC/gui_mac.m/gui_mac.c}
     EXE=$OUT/astra-ds
 else
