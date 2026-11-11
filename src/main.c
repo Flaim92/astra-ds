@@ -17,8 +17,45 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <stddef.h>
-/* Один экземпляр на пользователя Linux: абстрактный сокет (без файла на диске), держится до выхода. */
 static int g_single = -1;
+#ifdef __APPLE__
+/* macOS: абстрактных сокетов нет. Сокет-файл в личном временном каталоге пользователя ($TMPDIR, 0700),
+ * пустой, удаляется при выходе. Занят — проверить, что держит наш пользователь (getpeereid); не отвечает —
+ * остался от упавшего запуска: удалить и занять. */
+static char g_single_path[104];
+void single_instance_release(void) {
+    if (g_single >= 0) { close(g_single); g_single = -1; if (g_single_path[0]) unlink(g_single_path); }
+}
+bool single_instance(void) {
+    const char *t = getenv("TMPDIR");
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    if (!t || !*t || snprintf(a.sun_path, sizeof a.sun_path, "%s/astra-ds-%u.sock", t, (unsigned)getuid()) >= (int)sizeof a.sun_path) return true;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd < 0) return true;
+        if (bind(fd, (struct sockaddr *)&a, sizeof a) == 0) {
+            listen(fd, 1);
+            if (g_single < 0) { g_single = fd; snprintf(g_single_path, sizeof g_single_path, "%s", a.sun_path); } else close(fd);
+            return true;
+        }
+        close(fd);
+        if (errno != EADDRINUSE) return true;
+        int c = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (c < 0) return true;
+        bool alive = connect(c, (struct sockaddr *)&a, sizeof a) == 0;
+        uid_t u = (uid_t)-1;
+        gid_t g;
+        bool ours = alive && getpeereid(c, &u, &g) == 0 && u == getuid();
+        close(c);
+        if (alive) return !ours;
+        unlink(a.sun_path);                     /* хвост упавшего запуска */
+    }
+    return true;
+}
+#else
+/* Один экземпляр на пользователя Linux: абстрактный сокет (без файла на диске), держится до выхода. */
 void single_instance_release(void) { if (g_single >= 0) { close(g_single); g_single = -1; } }
 bool single_instance(void) {
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -47,6 +84,7 @@ bool single_instance(void) {
     close(c);
     return !ours;
 }
+#endif
 #endif
 
 /* Временно здесь, до переноса в mc.h координатором (раздел vless.c): */

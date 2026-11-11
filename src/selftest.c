@@ -16,6 +16,7 @@
 #endif
 #ifndef _WIN32
 #include <sys/mman.h>
+#include <unistd.h>                              /* sysconf: размер страницы */
 #endif
 #include <stdarg.h>
 #include <stdio.h>
@@ -29,6 +30,7 @@
 #include "cam.h"
 #include "portal_wl.h"
 #include "share_pw.h"
+#include "share.h"                              /* Video: share_start/share_state (проверка отказа на macOS) */
 
 static int fails, passes, defects;
 /* FAIL печатает строку; с ST_DUMP=1 ещё и экран 120x34 в момент проверки (без цветов) — для разбора. */
@@ -341,7 +343,7 @@ static bool scr_layout_ok(const Scr *s, bool text_ch, bool members, const char *
     return ok;
 }
 /* Всё сразу для одного снимка: сетка + оформление (+ раскладка, если layout). */
-__attribute__((unused)) static bool scr_all_ok(const Scr *s, const char *ctx) { return scr_grid_ok(s, ctx) & scr_deco_ok(s, ctx); }
+__attribute__((unused)) static bool scr_all_ok(const Scr *s, const char *ctx) { bool g = scr_grid_ok(s, ctx), d = scr_deco_ok(s, ctx); return g && d; }   /* обе проверки, обе печатают */
 
 /* ======================= мышь по подписям ======================= */
 static int CW = 120, CH = 34;
@@ -352,7 +354,11 @@ static bool on_screen(const char *s) { cur_take(); return scr_has(&cur, s); }
 static bool click_ex(const char *label, int button, int dx, bool rev) {
     cur_take();
     int x, y;
-    if (!scr_find_ex(&cur, label, &x, &y, rev)) { say("    не найдено на экране %dx%d: %s\n", CW, CH, label); return false; }
+    if (!scr_find_ex(&cur, label, &x, &y, rev)) {
+        say("    не найдено на экране %dx%d: %s\n", CW, CH, label);
+        for (int r = CH - 6; r < CH; r++) say("      |%s\n", scr_line(&cur, r));   /* низ экрана: панель голоса, подсказки */
+        return false;
+    }
     mouse_at(button, x + dx, y);
     return true;
 }
@@ -932,6 +938,10 @@ static void t_mouse(void) {
     VoiceStatus vs;
     voice_status(&vs);
     check(vs.phase != VS_IDLE && vs.channel_id == 3012, "кнопка «Присоединиться» входит в голос");
+    /* Поток голоса демо без звука (g_audio_fake) сперва ставит VS_FAILED с текстом «фиктивное устройство», затем
+     * VS_CONNECTED; в этом окне панель показывает ошибку вместо «канал / сервер». Ждём, пока поток дойдёт до
+     * CONNECTED (до 1 с), — иначе проверки панели ниже зависят от планировщика (было на macOS в CI). */
+    for (int i = 0; i < 50; i++) { voice_status(&vs); if (vs.phase == VS_CONNECTED) break; Waitable w = wake_waitable(g_wake); plat_wait(&w, 1, 20); wake_clear(g_wake); }
     check(on_screen("Голос") || scr_has(&cur, "Подключение"), "внизу колонки каналов — панель голоса");
     check(on_screen("Отключиться") && scr_has(&cur, "Выбрать статус канала"), "на экране канала — «Отключиться», под каналом «Выбрать статус канала»");
     check(scr_grid_ok(&cur, "в голосе") && scr_deco_ok(&cur, "в голосе") && scr_layout_ok(&cur, false, false, "в голосе"), "в голосе: сетка, ASCII, линии колонок");
@@ -2625,12 +2635,18 @@ static void t_packb3(void) {
 /* №15: перевод клавиш окна с Ctrl (чистые функции gui_win.c / gui_x11.c) */
 #ifdef _WIN32
 bool gb_vk_key(unsigned vk, bool ctrl, bool alt, Key *out);
-#else
+#elif !defined(__APPLE__)
 #include <X11/keysym.h>
 bool gb_ks_key(unsigned long base, unsigned long ks, bool alt, Key *out);
 #endif
+#ifndef __APPLE__   /* на macOS проверка пропускается, помощник не нужен */
 static bool kk(bool got, const Key *k, u32 ch) { return got && k->code == K_CHAR && k->ch == ch && k->ctrl && !k->alt; }
+#endif
 static void t_zoom_keys(void) {
+#ifdef __APPLE__
+    say("  [пропуск] клавиши масштаба окна: на macOS окна пока нет\n");
+    check(!term_zoom(1) && term_zoom_pct() == 100, "№15: без окна (selftest) term_zoom ничего не меняет, масштаб 100 %");
+#else
     Key k;
     bool ok = true;
 #ifdef _WIN32
@@ -2660,6 +2676,7 @@ static void t_zoom_keys(void) {
     snprintf(w, sizeof w, "№15: %s — Ctrl+= / Ctrl+- / Ctrl+0 и цифровой блок дают клавиши масштаба, без Ctrl и с AltGr — нет", where);
     check(ok, w);
     check(!term_zoom(1) && term_zoom_pct() == 100, "№15: без окна (selftest) term_zoom ничего не меняет, масштаб 100 %");
+#endif
 }
 /* Пакет Б: эмодзи серверов, разметка, опросы, эмбеды, ветки, форумы (демо и подставные ответы, без сети) */
 void emoji_test_resp(long status, const char *body);
@@ -3572,7 +3589,13 @@ static void t_ready_slim(void) {
 static unsigned fz_seed = 12345;
 static unsigned fz_rand(void) { fz_seed = fz_seed * 1103515245u + 12345u; return fz_seed >> 8; }
 static char *guard_alloc(size_t cap, void **base, size_t *basesz) {
-    size_t pg = 4096, data = (cap + pg - 1) / pg * pg;
+#ifdef _WIN32
+    size_t pg = 4096;
+#else
+    long sp = sysconf(_SC_PAGESIZE);            /* Apple Silicon — 16 КБ: mprotect требует выровненный адрес */
+    size_t pg = sp > 0 ? (size_t)sp : 4096;
+#endif
+    size_t data = (cap + pg - 1) / pg * pg;
 #ifdef _WIN32
     char *b = VirtualAlloc(NULL, data + pg, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     DWORD old;
@@ -3833,7 +3856,17 @@ int selftest(void) {
 #ifdef ASTRA_ANON
     { int anon_selftest(void (*ck)(bool ok, const char *what)); term_puts("\n  камера: скрытие глаз (anon.c):\n"); anon_selftest(check); }
 #endif
-#ifndef _WIN32
+#ifdef __APPLE__
+    term_puts("\n  [пропуск] демонстрация экрана в Wayland (PipeWire): на macOS нет Wayland и PipeWire\n");
+    {   /* share_mac.c: честный отказ тем же путём, что ошибки запуска в Linux (share_start -> err) */
+        ShareState shs;
+        char se[160] = "";
+        bool st = share_start(0, 0, se, sizeof se);
+        share_state(&shs);
+        check(!st && strstr(se, "macOS") && !shs.active && share_windows(NULL, NULL, 0) == 0 && !share_wayland(),
+              "демонстрация экрана на macOS: share_start честно отказывает, захват не запущен");
+    }
+#elif !defined(_WIN32)
     term_puts("\n  демонстрация экрана в Wayland (PipeWire, без портала):\n"); share_pw_selftest(check);
 #endif
     term_puts("\n  просмотр трансляций (тестировщик):\n"); t_gowatch();
@@ -3846,7 +3879,9 @@ int selftest(void) {
     term_puts("\n  отправка файла:\n");      t_file();
     term_puts("\n  кнопки входа и старта (тестировщик):\n"); t_login_buttons();
     term_puts("\n  таблица перевода ui_en.h (тестировщик):\n"); t_tr_table();
-#if defined(ASTRA_VIDEO) && !defined(_WIN32)
+#if defined(ASTRA_VIDEO) && defined(__APPLE__)
+    term_puts("\n  [пропуск] портал Wayland (xdg-desktop-portal): на macOS портала нет\n");
+#elif defined(ASTRA_VIDEO) && !defined(_WIN32)
     term_puts("\n  портал Wayland (xdg-desktop-portal):\n"); portal_wl_selftest(check);
 #endif
 
@@ -3928,6 +3963,7 @@ int selftest_gateway(void) {
     secret_set(FAKE, sizeof FAKE - 1);
     plat_net_init();
     if (!net_init()) { term_puts("сеть не запустилась\n"); return 1; }
+    ui_lang_init(0);                            /* проверки ищут русские строки состояния, язык системы не важен */
     ui_init();
     /* Этап 1: только gateway, ожидание как в главном цикле main.c — просыпаемся лишь по сокету
      * gateway или по его таймеру (gw_next_wake), без частого опроса. Так ловится Hello, застрявший
