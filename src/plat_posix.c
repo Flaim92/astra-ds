@@ -614,7 +614,7 @@ bool open_url_browser(const char *url) {
 }
 
 /* ---------- дочерняя программа ---------- */
-struct PlatFile { int fd; char path[1024]; };   /* path — macOS: fexecve нет, запуск по пути */
+struct PlatFile { int fd; char path[4096]; };   /* path — macOS: fexecve нет, запуск по пути */
 PlatFile *exe_open(const char *name, char *path, size_t pathn) {
     char p[4096];
     ssize_t n = readlink("/proc/self/exe", p, sizeof p - 1);
