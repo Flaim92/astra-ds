@@ -232,9 +232,9 @@ CamMac *cammac_open(const char *id, int maxw, int maxh, CamMacMode *m, int *err,
         if (!g->session_ || !g->output_ || !g->queue_) { cm_teardown(g); *err = CAMMAC_E_OTHER; return NULL; }
         g->output_.alwaysDiscardsLateVideoFrames = YES;
         g->output_.videoSettings = @{
-            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
-            (id)kCVPixelBufferWidthKey: @(ow),
-            (id)kCVPixelBufferHeightKey: @(oh),
+            (__bridge NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+            (__bridge NSString *)kCVPixelBufferWidthKey: @(ow),
+            (__bridge NSString *)kCVPixelBufferHeightKey: @(oh),
         };
         [g->output_ setSampleBufferDelegate:g queue:g->queue_];
 
