@@ -16,6 +16,7 @@
 #endif
 #ifndef _WIN32
 #include <sys/mman.h>
+#include <unistd.h>                              /* sysconf: размер страницы */
 #endif
 #include <stdarg.h>
 #include <stdio.h>
@@ -3518,7 +3519,13 @@ static void t_ready_slim(void) {
 static unsigned fz_seed = 12345;
 static unsigned fz_rand(void) { fz_seed = fz_seed * 1103515245u + 12345u; return fz_seed >> 8; }
 static char *guard_alloc(size_t cap, void **base, size_t *basesz) {
-    size_t pg = 4096, data = (cap + pg - 1) / pg * pg;
+#ifdef _WIN32
+    size_t pg = 4096;
+#else
+    long sp = sysconf(_SC_PAGESIZE);            /* Apple Silicon — 16 КБ: mprotect требует выровненный адрес */
+    size_t pg = sp > 0 ? (size_t)sp : 4096;
+#endif
+    size_t data = (cap + pg - 1) / pg * pg;
 #ifdef _WIN32
     char *b = VirtualAlloc(NULL, data + pg, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     DWORD old;
@@ -3886,6 +3893,7 @@ int selftest_gateway(void) {
     secret_set(FAKE, sizeof FAKE - 1);
     plat_net_init();
     if (!net_init()) { term_puts("сеть не запустилась\n"); return 1; }
+    ui_lang_init(0);                            /* проверки ищут русские строки состояния, язык системы не важен */
     ui_init();
     /* Этап 1: только gateway, ожидание как в главном цикле main.c — просыпаемся лишь по сокету
      * gateway или по его таймеру (gw_next_wake), без частого опроса. Так ловится Hello, застрявший
