@@ -2819,7 +2819,8 @@ static void draw_poll_row(int tx, int y, int tw, int mi, int row) {
         const char *mk = p->multi ? (a->me ? "[x]" : "[ ]") : (a->me ? "(*)" : "( )");
         bool win = closed && best > 0 && a->count == best;
         int u = g_text(x, y, mk, 3, a->me ? C_WHITE : C_MUTED, AT_B) + 1;
-        snprintf(t, sizeof t, res ? "%d%% (%d)" : "", pct, a->count);
+        if (res) snprintf(t, sizeof t, "%d%% (%d)", pct, a->count);
+        else t[0] = 0;
         int rw = res ? vw(t) : 0;
         g_texte(x + u, y, a->text ? a->text : "", w - u - rw - 1, C_TEXT, win || a->me ? AT_B : 0);
         if (res) g_text(x + w - rw, y, t, rw, win ? C_WHITE : C_MUTED, win ? AT_B : 0);

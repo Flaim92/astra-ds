@@ -342,7 +342,7 @@ static bool scr_layout_ok(const Scr *s, bool text_ch, bool members, const char *
     return ok;
 }
 /* Всё сразу для одного снимка: сетка + оформление (+ раскладка, если layout). */
-__attribute__((unused)) static bool scr_all_ok(const Scr *s, const char *ctx) { return scr_grid_ok(s, ctx) & scr_deco_ok(s, ctx); }
+__attribute__((unused)) static bool scr_all_ok(const Scr *s, const char *ctx) { bool g = scr_grid_ok(s, ctx), d = scr_deco_ok(s, ctx); return g && d; }   /* обе проверки, обе печатают */
 
 /* ======================= мышь по подписям ======================= */
 static int CW = 120, CH = 34;

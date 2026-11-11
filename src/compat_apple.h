@@ -35,7 +35,9 @@ fail:
 /* socket(): флаги типа Linux SOCK_CLOEXEC / SOCK_NONBLOCK; потоковым сокетам — без SIGPIPE */
 #define SOCK_CLOEXEC 0x10000000
 #define SOCK_NONBLOCK 0x20000000
+#ifndef MSG_NOSIGNAL                           /* новые SDK его уже определяют */
 #define MSG_NOSIGNAL 0
+#endif
 static inline int astra_socket(int dom, int type, int proto) {
     int fl = type & (SOCK_CLOEXEC | SOCK_NONBLOCK);
     int s = socket(dom, type & ~(SOCK_CLOEXEC | SOCK_NONBLOCK), proto);
@@ -47,6 +49,18 @@ static inline int astra_socket(int dom, int type, int proto) {
     return s;
 }
 #define socket(d, t, p) astra_socket(d, t, p)
+
+/* accept4: accept + флаги */
+static inline int astra_accept4(int ls, struct sockaddr *a, socklen_t *al, int fl) {
+    int s = accept(ls, a, al);
+    if (s < 0) return -1;
+    if ((fl & SOCK_CLOEXEC) && fcntl(s, F_SETFD, FD_CLOEXEC) < 0) { close(s); return -1; }
+    if ((fl & SOCK_NONBLOCK) && fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK) < 0) { close(s); return -1; }
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+    return s;
+}
+#define accept4(l, a, al, f) astra_accept4(l, a, al, f)
 
 /* getrandom: getentropy отдаёт не больше 256 байт за вызов */
 #define GRND_NONBLOCK 1

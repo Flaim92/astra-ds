@@ -2,6 +2,11 @@
  * Принципы: безопасность > нулевое логирование > минимум памяти и процессора. */
 #ifndef MC_H
 #define MC_H
+#ifdef __APPLE__
+/* macOS: эти имена уже объявлены в заголовках mach (их тянут Cocoa и mach/mach.h) — у нас свои символы */
+#define thread_create astra_thread_create
+#define panic_init astra_panic_init
+#endif
 
 #include <stddef.h>
 #include <stdint.h>

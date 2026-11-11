@@ -228,6 +228,24 @@ build_rnnoise() {
     unpack rnnoise-0.2.tar.gz rnnoise
     local b=$BLD/rnnoise o=$BLD/rnnoise-o
     rm -rf "$o"; mkdir -p "$o"
+    # Без AVX/SSE2 (ARM, Apple Silicon) vec.h берёт переносимый вариант, а он ждёт os_support.h из Opus,
+    # которого в архиве нет: нужные ему макросы копирования — свои.
+    [ -f "$b/src/os_support.h" ] || cat > "$b/src/os_support.h" <<'EOT'
+#ifndef OS_SUPPORT_H
+#define OS_SUPPORT_H
+#include <string.h>
+#include <stdlib.h>
+#ifndef OPUS_COPY
+#define OPUS_COPY(dst, src, n) (memcpy((dst), (src), (n) * sizeof(*(dst)) + 0 * ((dst) - (src))))
+#endif
+#ifndef OPUS_MOVE
+#define OPUS_MOVE(dst, src, n) (memmove((dst), (src), (n) * sizeof(*(dst)) + 0 * ((dst) - (src))))
+#endif
+#ifndef OPUS_CLEAR
+#define OPUS_CLEAR(dst, n) (memset((dst), 0, (n) * sizeof(*(dst))))
+#endif
+#endif
+EOT
     for f in denoise rnn pitch kiss_fft celt_lpc nnet nnet_default parse_lpcnet_weights rnnoise_data rnnoise_tables; do
         # DISABLE_NEON: на ARM (Apple Silicon) — тот же переносимый C (NEON-вариант ждёт os_support.h, которого нет в архиве)
         gcc $CFLAGS -std=gnu11 -DDISABLE_NEON -I"$b/include" -I"$b/src" -c "$b/src/$f.c" -o "$o/$f.o"
