@@ -29,6 +29,7 @@
 #include "cam.h"
 #include "portal_wl.h"
 #include "share_pw.h"
+#include "share.h"                              /* Video: share_start/share_state (проверка отказа на macOS) */
 
 static int fails, passes, defects;
 /* FAIL печатает строку; с ST_DUMP=1 ещё и экран 120x34 в момент проверки (без цветов) — для разбора. */
@@ -2632,8 +2633,7 @@ bool gb_ks_key(unsigned long base, unsigned long ks, bool alt, Key *out);
 static bool kk(bool got, const Key *k, u32 ch) { return got && k->code == K_CHAR && k->ch == ch && k->ctrl && !k->alt; }
 static void t_zoom_keys(void) {
 #ifdef __APPLE__
-    say("  [пропуск] клавиши масштаба окна: на macOS окна пока нет
-");
+    say("  [пропуск] клавиши масштаба окна: на macOS окна пока нет\n");
     check(!term_zoom(1) && term_zoom_pct() == 100, "№15: без окна (selftest) term_zoom ничего не меняет, масштаб 100 %");
 #else
     Key k;
@@ -3777,7 +3777,17 @@ int selftest(void) {
 #ifdef ASTRA_ANON
     { int anon_selftest(void (*ck)(bool ok, const char *what)); term_puts("\n  камера: скрытие глаз (anon.c):\n"); anon_selftest(check); }
 #endif
-#ifndef _WIN32
+#ifdef __APPLE__
+    term_puts("\n  [пропуск] демонстрация экрана в Wayland (PipeWire): на macOS нет Wayland и PipeWire\n");
+    {   /* share_mac.c: честный отказ тем же путём, что ошибки запуска в Linux (share_start -> err) */
+        ShareState shs;
+        char se[160] = "";
+        bool st = share_start(0, 0, se, sizeof se);
+        share_state(&shs);
+        check(!st && strstr(se, "macOS") && !shs.active && share_windows(NULL, NULL, 0) == 0 && !share_wayland(),
+              "демонстрация экрана на macOS: share_start честно отказывает, захват не запущен");
+    }
+#elif !defined(_WIN32)
     term_puts("\n  демонстрация экрана в Wayland (PipeWire, без портала):\n"); share_pw_selftest(check);
 #endif
     term_puts("\n  просмотр трансляций (тестировщик):\n"); t_gowatch();
@@ -3790,7 +3800,9 @@ int selftest(void) {
     term_puts("\n  отправка файла:\n");      t_file();
     term_puts("\n  кнопки входа и старта (тестировщик):\n"); t_login_buttons();
     term_puts("\n  таблица перевода ui_en.h (тестировщик):\n"); t_tr_table();
-#if defined(ASTRA_VIDEO) && !defined(_WIN32)
+#if defined(ASTRA_VIDEO) && defined(__APPLE__)
+    term_puts("\n  [пропуск] портал Wayland (xdg-desktop-portal): на macOS портала нет\n");
+#elif defined(ASTRA_VIDEO) && !defined(_WIN32)
     term_puts("\n  портал Wayland (xdg-desktop-portal):\n"); portal_wl_selftest(check);
 #endif
 
