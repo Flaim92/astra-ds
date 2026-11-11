@@ -4,7 +4,7 @@ name: macos
 on:
   workflow_dispatch:
   push:
-    branches: [macos]
+    branches: [macos, main]
 
 permissions:
   contents: read
