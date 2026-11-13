@@ -157,7 +157,7 @@ enum { MI_REPLY = 1, MI_EDIT, MI_DELETE, MI_REACT, MI_COPY,
        MI_THREAD, MI_T_JOIN, MI_GDM_ADD, MI_GDM_LEAVE, MI_FOCUS30, MI_FOCUS60, MI_FOCUS120, MI_FOCUSOFF, MI_C_VSTATUS, MI_STATUS_SET, MI_C_ARCH, MI_T_RENAME, MI_T_ARCH, MI_T_LOCK, MI_T_MEMB, MI_GDM_RENAME,                                 /* пакет Б: создать ветку; вступить/покинуть ветку */
        MI_MRETRY, MI_MDISCARD, MI_G_UNFOLD,
        MI_V_VOL, MI_V_UP, MI_V_DN, MI_V_MUTE, MI_V_PROF, MI_V_MOVE, MI_V_SMUTE, MI_V_MIC, MI_V_DEAF,
-       MI_F_RENAME, MI_F_COLOR, MI_F_UNGROUP, MI_FC_DEF, MI_FC_0 };   /* №2 меню папки серверов; MI_FC_0 + i — цвет FOLD_PAL[i] */   /* меню участника голосового канала */                             /* неотправленное: повторить, отменить */
+       MI_F_RENAME, MI_F_COLOR, MI_F_MUTE, MI_F_UNGROUP, MI_FC_DEF, MI_FC_0 };   /* №2 меню папки серверов; MI_FC_0 + i - цвет FOLD_PAL[i] */   /* меню участника голосового канала */                             /* неотправленное: повторить, отменить */
 enum { MENU_MSG = 1, MENU_SET, MENU_FRIEND, MENU_STATUS, MENU_GUILD, MENU_CHAN, MENU_VMEM, MENU_FOLDER, MENU_FCOLOR };
 #define MENU_LEFT(k) ((k) == MENU_SET || (k) == MENU_STATUS || (k) == MENU_GUILD || (k) == MENU_CHAN || (k) == MENU_VMEM || (k) == MENU_FOLDER || (k) == MENU_FCOLOR)
 enum { RP_NONE, RP_PINS, RP_INBOX };
@@ -3778,6 +3778,11 @@ static int menu_items(int kind, const Message *m, int *ids, const char **names, 
     if (kind == MENU_FOLDER) {
         ids[n] = MI_F_RENAME; danger[n] = false; names[n++] = TR("Переименовать");
         ids[n] = MI_F_COLOR; danger[n] = false; names[n++] = TR("Цвет...");
+        {   /* «Не беспокоить»: заглушены все серверы папки - галочка */
+            static char ml[64];
+            snprintf(ml, sizeof ml, "%s %s", guild_folder_muted(menu_fgid) ? "[x]" : "[ ]", TR("Не беспокоить"));
+            ids[n] = MI_F_MUTE; danger[n] = false; names[n++] = ml;
+        }
         ids[n] = MI_F_UNGROUP; danger[n] = true; names[n++] = TR("Распустить папку");
         return n;
     }
@@ -6640,7 +6645,7 @@ static const char *guild_description(u64 g) { (void)g; return ""; }
 
 enum { FF_TEXT, FF_CHOICE, FF_TOGGLE, FF_TRI, FF_INFO };
 enum { FM_NONE, FM_ADDSRV, FM_GCREATE, FM_JOIN, FM_JOINCARD, FM_INVITE, FM_GSET, FM_GDELETE, FM_LEAVE, FM_CHCREATE,
-       FM_CATCREATE, FM_CHEDIT, FM_CHDELETE, FM_PERMS, FM_ADDFRIEND, FM_THREAD, FM_ALERTS, FM_FILTER, FM_VSTATUS, FM_TRENAME, FM_FPOST, FM_GRENAME, FM_MEPROF, FM_FALT, FM_MOD, FM_STATUS, FM_NOTE, FM_SHARE, FM_CAM, FM_FRENAME };
+       FM_CATCREATE, FM_CHEDIT, FM_CHDELETE, FM_PERMS, FM_ADDFRIEND, FM_THREAD, FM_ALERTS, FM_FILTER, FM_VSTATUS, FM_TRENAME, FM_FPOST, FM_GRENAME, FM_MEPROF, FM_FALT, FM_MOD, FM_STATUS, FM_NOTE, FM_SHARE, FM_CAM, FM_FRENAME, FM_FNEW };
 enum { FB_OK = 1, FB_CANCEL, FB_X1, FB_X2, FB_RETRY };     /* кнопки формы (sub у A_FORMB) */
 /* буфер поля — в куче на время окна: лимит поля в символах x 4 байта (тема 1024 символа целиком), иначе 256 */
 static void utf8_cpy(char *d, size_t n, const char *s);
@@ -6730,6 +6735,7 @@ static void perms_load(void) {
 }
 static u64 fm_mid;                               /* «Создать ветку»: из какого сообщения */
 static u64 fm_note_uid;                          /* №100: чья заметка в форме */
+static u64 fm_nf_src;                            /* «Новая папка»: перетаскиваемый сервер (FM.gid - сервер-цель) */
 static const char *const ST_CH[] = { "В сети", "Не активен", "Не беспокоить", "Невидимый" };
 static const char *const ST_DUR[] = { "бессрочно", "15 минут", "1 час", "8 часов", "24 часа", "3 дня" };
 static const int ST_DUR_MIN[] = { 0, 15, 60, 480, 1440, 4320 };
@@ -6938,6 +6944,16 @@ static void fm_open(int id, u64 gid, u64 cid) {
         snprintf(FM.sub, sizeof FM.sub, TR("Пусто - папка без названия. Не длиннее %d символов."), FOLDER_NAME_MAX);
         fm_set(fm_add(FF_TEXT, "НАЗВАНИЕ ПАПКИ", NULL), nm);
         fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Сохранить"), FB_OK, 1);
+        break;
+    }
+    case FM_FNEW: {                              /* сервер брошен на сервер: gid - цель, fm_nf_src - перетаскиваемый */
+        Guild *gs = guild_find(fm_nf_src);
+        snprintf(FM.title, sizeof FM.title, TR("Новая папка"));
+        snprintf(FM.sub, sizeof FM.sub, TR("Папка из серверов %s и %s. Название можно не вводить (до %d символов)."),
+                 g && g->name ? g->name : "?", gs && gs->name ? gs->name : "?", FOLDER_NAME_MAX);
+        fm_add(FF_TEXT, "НАЗВАНИЕ ПАПКИ", "");
+        fm_add(FF_TOGGLE, "Не беспокоить", NULL);   /* заглушить все серверы новой папки */
+        fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Создать"), FB_OK, 1);
         break;
     }
     case FM_FPOST:
@@ -7844,8 +7860,9 @@ static bool rail_target(int x, int y, RailDrop *d) {
         else if (open && !GD.whole) { d->how = GM_BEFORE; d->top = false; d->line_y = y0 + 3; }   /* в начало папки */
         else { d->how = GM_AFTER; d->top = true; d->line_y = y0 + 3; }
     } else if (t->fk < 0) {                     /* сервер верхнего уровня */
-        /* сервер на сервер — только перестановка (новые папки перетаскиванием не создаются) */
-        if (r <= 1) { d->how = GM_BEFORE; d->top = true; d->line_y = y0 - 1; }
+        /* середина плитки - новая папка (рамка; при отпускании - окно «Новая папка»), края - перестановка */
+        if (r == 0 || (r == 1 && (GD.whole || t->gid == GD.gid))) { d->how = GM_BEFORE; d->top = true; d->line_y = y0 - 1; }
+        else if (r == 1) { d->how = GM_NEWFOLDER; d->box_y = y0; }
         else { d->how = GM_AFTER; d->top = true; d->line_y = y0 + 3; }
     } else {                                    /* сервер в развёрнутой папке */
         d->top = GD.whole;
@@ -7877,7 +7894,11 @@ static void rail_drag(const Key *k) {
 }
 static void rail_release(const Key *k) {
     RailDrop d;
-    if (GD.on && rail_target(k->x, k->y, &d)) rail_move(GD.gid, GD.whole, d.how, d.ref, d.top);
+    if (GD.on && rail_target(k->x, k->y, &d)) {
+        if (d.how == GM_NEWFOLDER) {            /* папка - только после подтверждения в окне */
+            if (guild_find(GD.gid) && guild_find(d.ref) && GD.gid != d.ref) { fm_nf_src = GD.gid; fm_open(FM_FNEW, d.ref, 0); }
+        } else rail_move(GD.gid, GD.whole, d.how, d.ref, d.top);
+    }
     memset(&GD, 0, sizeof GD);
     U.dirty = true;
 }
@@ -8112,7 +8133,8 @@ static void draw_rail(int H) {
     if (GD.on && rail_target(GD.x, GD.y, &dd)) {   /* куда ляжет перетаскиваемый: черта или рамка */
         bool inner = !dd.top && dd.how != GM_INTO;   /* место внутри папки — короткая черта по значку */
         if (dd.line_y >= 0 && dd.line_y < H) g_rect(inner ? 2 : 0, dd.line_y, inner ? 4 : RAIL_W - 1, 1, C_WHITE);
-        if (dd.box_y >= 0) for (int r = 0; r < 3 && dd.box_y + r < H; r++) { g_ch(1, dd.box_y + r, '[', C_WHITE, AT_B); g_ch(6, dd.box_y + r, ']', C_WHITE, AT_B); }
+        /* рамка - по бокам значка (столбцы 0 и 7): поверх картинки значка (окно) скобки не видны; фон - колонки (не «пилюля», не бейдж) */
+        if (dd.box_y >= 0) for (int r = 0; r < 3 && dd.box_y + r < H; r++) { g_rect(0, dd.box_y + r, 1, 1, C_RAIL); g_rect(7, dd.box_y + r, 1, 1, C_RAIL); g_ch(0, dd.box_y + r, '[', C_WHITE, AT_B); g_ch(7, dd.box_y + r, ']', C_WHITE, AT_B); }
     }
     /* «+» добавить сервер: серый квадрат с зелёным плюсом */
     int py = last_y + step;
@@ -10738,6 +10760,16 @@ static void fm_submit(int bid) {
     case FM_FRENAME:                             /* без изменений (false без причины) — просто закрыть */
         ok = !fm_changed(&FM.f[0]) || guild_folder_edit(FM.gid, FM.f[0].val, FOLDER_COLOR_KEEP, err, sizeof err) || !err[0];
         break;
+    case FM_FNEW: {
+        ok = guild_folder_create(fm_nf_src, FM.gid, FM.f[0].val, err, sizeof err);
+        if (!ok) break;
+        char nm[FOLDER_NAME_MAX * 4 + 1];
+        guild_folder_name(FM.gid, nm, sizeof nm);
+        if (nm[0]) ui_notice(TR("Папка \"%s\" создана"), nm);
+        else ui_notice(TR("Папка создана"));
+        if (FM.f[1].ch) guild_folder_mute(FM.gid, true);   /* «Не беспокоить»: заглушить каждый сервер папки (отказ - своим уведомлением) */
+        break;
+    }
     case FM_FPOST: ok = forum_post_create(FM.cid, FM.f[0].val, FM.f[1].val, err, sizeof err); if (ok) ui_notice(TR("пост опубликован")); break;
     case FM_MEPROF: ok = profile_me_set(FM.f[0].val[0] ? FM.f[0].val : NULL, FM.f[1].val[0] ? FM.f[1].val : NULL, err, sizeof err); if (ok) ui_notice(TR("профиль сохранён")); break;
     case FM_VSTATUS: ok = voice_channel_status_set(FM.cid, FM.f[0].val, err, sizeof err); break;
@@ -10928,6 +10960,11 @@ static void msg_action(Message *m, int what) {
         if (!menu_folder()) return;
         if (what == MI_F_RENAME) fm_open(FM_FRENAME, menu_fgid, 0);
         else if (what == MI_F_COLOR) menu_open(MENU_FCOLOR, -1, U.menu_x, U.menu_y);
+        else if (what == MI_F_MUTE) {           /* все заглушены - включить всем, иначе заглушить всех */
+            bool on = !guild_folder_muted(menu_fgid);
+            guild_folder_mute(menu_fgid, on);
+            ui_notice(on ? TR("папка: не беспокоить") : TR("папка: уведомления включены"));
+        }
         else if (what == MI_F_UNGROUP) { if (!guild_folder_ungroup(menu_fgid, err, sizeof err) && err[0]) ui_notice("%s", err); }
         else if (!guild_folder_edit(menu_fgid, NULL, what == MI_FC_DEF ? FOLDER_COLOR_DEFAULT : (i64)FOLD_PAL[what - MI_FC_0].c, err, sizeof err) && err[0]) ui_notice("%s", err);
         U.dirty = true;

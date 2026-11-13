@@ -444,7 +444,7 @@ int guild_rail(RailEnt **out);                             /* *out — в куч
  * src — сервер; whole — двигать его папку целиком. ref — сервер-ориентир; ref_top — относительно записи верхнего
  * уровня, где ref (его папки целиком), иначе — внутри папки ref. GM_INTO — в конец папки ref; GM_NEWFOLDER —
  * новая папка из ref и src. false — не изменилось (err — причина, если есть). */
-enum { GM_BEFORE, GM_AFTER, GM_INTO };
+enum { GM_BEFORE, GM_AFTER, GM_INTO, GM_NEWFOLDER };
 bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, size_t errn);
 void guild_folders_pb(Buf *out);                           /* protobuf PreloadedUserSettings только с полем 14 */
 /* Настройки папки, где сервер gid (только настоящая папка: с id или из нескольких серверов). name: NULL — не менять,
@@ -457,6 +457,11 @@ bool guild_folder_edit(u64 gid, const char *name, i64 color, char *err, size_t e
 bool guild_folder_ungroup(u64 gid, char *err, size_t errn);   /* распустить: серверы остаются на месте по порядку */
 bool guild_unfold(u64 gid, char *err, size_t errn);        /* «Убрать из папки»: сервер — отдельно, сразу после папки */
 bool guild_in_folder(u64 gid);                             /* сервер в папке (не одиночная запись) */
+/* Новая папка из серверов вне папок: на месте ref, в ней ref и src; name - как у guild_folder_edit (пусто - без
+ * названия). Новый id, одна запись поля 14, откат при отказе. Окно подтверждения - в ui.c (бросок на сервер). */
+bool guild_folder_create(u64 src, u64 ref, const char *name, char *err, size_t errn);
+bool guild_folder_muted(u64 gid);                          /* все серверы папки, где gid, заглушены */
+int guild_folder_mute(u64 gid, bool mute);                 /* mute_guild каждому серверу папки, где состояние другое */
 void guild_folder_name(u64 gid, char *out, size_t n);         /* название папки целиком (GuildFolder.name — до 64 байт) */
 bool guild_order_busy(void);                               /* запись порядка ещё не подтверждена */
 /* №119 слова-тревоги: только в памяти; сообщение со словом — как упоминание (подсветка и счётчик) */

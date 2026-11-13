@@ -735,7 +735,7 @@ static void t_guild_order(void) {
     check(m4, "№2 перенос из папки ниже другой папки, protobuf верный");
     bool m5 = guild_move(2500, false, GM_AFTER, 2000, true, err, sizeof err) && rail_is("[2600 2700] [2100] 2000 2500") && pb_roundtrip() &&
               !guild_move(2500, false, GM_INTO, 2000, false, err, sizeof err) && rail_is("[2600 2700] [2100] 2000 2500");
-    check(m5, "№2 сервер на сервер — только перестановка, новая папка не создаётся; protobuf верный");
+    check(m5, "№2 сервер на сервер вне папки: перестановка; GM_INTO папку молча не создаёт (новая - только через окно); protobuf верный");
     bool m6 = guild_move(2600, true, GM_AFTER, 2100, true, err, sizeof err) && rail_is("[2100] [2600 2700] 2000 2500") && pb_roundtrip();
     bool m7 = !guild_move(2600, true, GM_INTO, 2100, false, err, sizeof err) && !guild_move(2700, false, GM_AFTER, 2600, false, err, sizeof err) &&
               !guild_move(2600, false, GM_BEFORE, 2600, false, err, sizeof err) && rail_is("[2100] [2600 2700] 2000 2500");
@@ -1151,8 +1151,9 @@ static void t_folders(void) {
     f = folder_of(2000);
     bool dr = rail_is("[2600 2700] [2100 2500 2000]") && f && f->name && !strcmp(f->name, "Ура") && f->color == 0x3498db && pb_roundtrip();
     cur_take(); mouse_at(3, 3, 11);                          /* «Ура» теперь вторая (y 10): распустить */
-    key(K_DOWN, 0); key(K_DOWN, 0); key(K_ENTER, 0);
-    bool um = rail_is("[2600 2700] 2100 2500 2000");
+    bool dnd = on_screen("[ ] Не беспокоить");
+    key(K_DOWN, 0); key(K_DOWN, 0); key(K_DOWN, 0); key(K_ENTER, 0);
+    bool um = dnd && rail_is("[2600 2700] 2100 2500 2000");
     check(mn && fm && cm && dr && um, "№2 меню папки по правой кнопке: переименовать (окно с названием), цвет, распустить; перетаскивание после переименования");
     if (!(mn && fm && cm && dr && um)) say("    меню %d окно %d цвет %d протяжка %d роспуск %d\n", mn, fm, cm, dr, um);
     folders_test_pop();
@@ -1429,6 +1430,192 @@ static void t_folders_drag(void) {
     key(K_TAB, 0);
     key(K_ENTER, 0);
 }
+/* №2 новая папка: сервер на середину плитки сервера вне папок - рамка, при отпускании окно «Новая папка»
+ * (название, «Не беспокоить»); без «Создать» ничего не меняется и в Discord не уходит. «Создать» - одна запись
+ * поля 14: новая папка с новым id и названием на месте цели, остальное байт в байт; «Не беспокоить» - PATCH
+ * .../guilds/{id}/settings каждому серверу папки. Полоса fold_test_ready: 2000 (y 6, без записи), папка без
+ * имени (10), «Игры» (14), 2200 (18), [2201] (22), «Тройка» (26), «Четвёрка» (30). */
+static char fn_paths[8][96];
+static int fn_npath;
+static bool fn_guard(const char *method, const char *path) {
+    if (!strcmp(method, "PATCH") && strstr(path, "/users/@me/guilds/") && fn_npath < 8) snprintf(fn_paths[fn_npath++], sizeof fn_paths[0], "%s", path);
+    return false;                               /* в сеть ничего не уходит */
+}
+static bool fn_sent(u64 g) {
+    char p[96];
+    snprintf(p, sizeof p, "/users/@me/guilds/%llu/settings", (unsigned long long)g);
+    for (int i = 0; i < fn_npath; i++) if (!strcmp(fn_paths[i], p)) return true;
+    return false;
+}
+static void fn_drag(int y1, int y2, bool release) {   /* взять значок на строке y1, протащить на строку y2 */
+    cur_take();
+    mouse_at(1, 3, y1);
+    mouse_at(6, 3, (y1 + y2) / 2);
+    mouse_at(6, 3, y2);
+    if (release) mouse_at(7, 3, y2);
+}
+static void t_folder_new(void) {
+    char r0[1024], r1[1024];
+    const GuildFolder *f;
+    CW = 120; CH = 40;
+    hover_off();
+    ui_notice_clear();
+    ui_fold_close_all();
+
+    /* 1. рамка над серединой сервера; отпускание - окно, а не папка; Esc и «Отмена» - без изменений и записи */
+    folders_test_push();
+    fold_test_ready();
+    guild_order_test_hold(true);
+    rail_str(r0, sizeof r0);
+    fn_drag(19, 7, false);                       /* 2200 -> середина 2000 */
+    cur_take();
+    const SC *bl = scr_cell(&cur, 0, 6), *br = scr_cell(&cur, 7, 8);
+    bool box = bl && br && bl->cp == '[' && br->cp == ']';
+    mouse_at(7, 3, 7);
+    rail_str(r1, sizeof r1);
+    bool w1 = on_screen("Новая папка") && on_screen("Папка из серверов") && on_screen("Не беспокоить") && !strcmp(r0, r1) && !guild_order_busy();
+    key(K_ESC, 0);
+    rail_str(r1, sizeof r1);
+    bool esc = !on_screen("Новая папка") && !strcmp(r0, r1) && !guild_order_busy() && !guild_in_folder(2000);
+    fn_drag(19, 7, true);
+    bool cn = on_screen("Новая папка") && click("Отмена");
+    rail_str(r1, sizeof r1);
+    cn = cn && !on_screen("Новая папка") && !strcmp(r0, r1) && !guild_order_busy() && folder_of(2200)->n == 1 && !folder_of(2200)->id;
+    check(box && w1, "№2 новая папка: сервер на середину сервера вне папок - рамка, при отпускании окно «Новая папка», полоса та же, записи нет");
+    check(esc && cn, "№2 новая папка: Esc и «Отмена» - окно закрыто, полоса та же, в Discord ничего не ушло");
+    if (!(box && w1 && esc && cn)) { say("    рамка %d окно %d Esc %d Отмена %d\n", box, w1, esc, cn); scr_print(&cur); }
+
+    /* 2. «Создать» с названием и «Не беспокоить»: новая папка на месте 2000, PATCH заглушения обоим серверам */
+    Buf rec[6], pb = {0};
+    for (int k = 0; k < 6; k++) folder_rec(k, &rec[k]);
+    O.demo = false; g_http_guard = fn_guard; fn_npath = 0;
+    fn_drag(19, 7, true);
+    type("  Дуэт ");
+    key(K_TAB, 0);                               /* к галочке */
+    bool tg0 = on_screen("[ ] Не беспокоить");
+    key(K_CHAR, ' ');
+    bool tg1 = on_screen("[x] Не беспокоить");
+    key(K_ENTER, 0);
+    f = folder_of(2000);
+    bool c1 = tg0 && tg1 && !on_screen("Новая папка") && f && f->n == 2 && f->gids[0] == 2000 && f->gids[1] == 2200 && f->id > 5 &&
+              f->name && !strcmp(f->name, "Дуэт") && fold_k(2000) == 0 && guild_order_busy();
+    i64 nid = f ? f->id : 0;                     /* f - в FD: после обратного разбора (pb_roundtrip) недействителен */
+    bool mt = fn_npath == 2 && fn_sent(2000) && fn_sent(2200) && guild_find(2000)->muted && guild_find(2200)->muted &&
+              !guild_find(2100)->muted && !guild_find(2600)->muted;
+    bool nt = on_screen("Папка \"Дуэт\" создана");
+    guild_order_test_reply(200, NULL);
+    c1 = c1 && !guild_order_busy() && pb_roundtrip();
+    {   /* остальные записи байт в байт: было A B C D E F, стало Новая A B D E F (C - это 2200, ушёл в новую) */
+        static const int was[] = { 0, 1, 3, 4, 5 };
+        for (int i = 0; i < 5; i++) {
+            Buf r;
+            folder_rec(i + 1, &r);
+            if (r.len != rec[was[i]].len || memcmp(r.p, rec[was[i]].p, r.len)) c1 = false;
+            buf_free(&r);
+        }
+        for (int i = 0; i < 5; i++) if (folder_of(i == 0 ? 2600 : i == 1 ? 2100 : i == 2 ? 2201 : i == 3 ? 2202 : 2204)->id == nid) c1 = false;
+    }
+    pb_now(&pb);
+    c1 = c1 && pb_has(&pb, "\x48\x4d", 2) && pb_has(&pb, "\x28\x01", 2) && pb_has(&pb, "Дуэт", strlen("Дуэт"));
+    {   /* запись новой папки: 0A len | 0A 10 + два id | 12 (поле 2, id) | 1A (поле 3, название) */
+        Buf r;
+        folder_rec(0, &r);
+        size_t pnm = 0;
+        for (size_t i = 0; i + strlen("Дуэт") <= r.len && !pnm; i++) if (!memcmp(r.p + i, "Дуэт", strlen("Дуэт"))) pnm = i;
+        c1 = c1 && r.len > 22 && r.p[2] == 0x0A && r.p[3] == 0x10 && r.p[20] == 0x12 && pnm > 22;
+        buf_free(&r);
+    }
+    c1 = c1 && pb_relogin() && folder_of(2200) == folder_of(2000) && folder_of(2000)->name && !strcmp(folder_of(2000)->name, "Дуэт");
+    check(c1, "№2 новая папка «Создать» с названием: на месте цели, новый id, название в protobuf, только поле 14, остальные папки и неизвестные поля целы, обратный разбор и второй вход");
+    check(mt, "№2 новая папка «Не беспокоить»: PATCH /users/@me/guilds/{id}/settings каждому серверу папки, только им");
+    check(nt, "№2 новая папка: уведомление «Папка \"Дуэт\" создана»");
+    if (!(c1 && mt && nt)) say("    папка %d запросов %d уведомление %d\n", c1, fn_npath, nt);
+    /* меню папки по правой кнопке: «[x] Не беспокоить» - снять со всех серверов папки, снова - заглушить всех */
+    ui_fold_close_all();
+    rclick_at(3, 7);
+    bool fm1 = on_screen("[x] Не беспокоить") && click("Не беспокоить");
+    fm1 = fm1 && fn_npath == 4 && !guild_find(2000)->muted && !guild_find(2200)->muted && fn_sent(2000) && fn_sent(2200);
+    mute_guild(2200, true);                      /* один из двух заглушён - пункт без галочки, заглушает оставшийся */
+    rclick_at(3, 7);
+    bool fm2 = on_screen("[ ] Не беспокоить") && click("Не беспокоить");
+    fm2 = fm2 && fn_npath == 6 && guild_find(2000)->muted && guild_find(2200)->muted && !strcmp(fn_paths[5], "/users/@me/guilds/2000/settings");
+    check(fm1 && fm2, "№2 меню папки «Не беспокоить»: галочка - все серверы заглушены; щелчок снимает со всех или заглушает незаглушённые");
+    if (!(fm1 && fm2)) { say("    снять %d заглушить %d запросов %d\n", fm1, fm2, fn_npath); scr_print(&cur); }
+    key(K_ESC, 0);
+    mute_guild(2000, false); mute_guild(2200, false);
+    for (int k = 0; k < 6; k++) buf_free(&rec[k]);
+    buf_free(&pb);
+    O.demo = true; g_http_guard = NULL;
+    ui_notice_clear();
+    guild_order_test_hold(false);
+    folders_test_pop();
+
+    /* 3. «Создать» без названия и без галочки: папка без поля 3, заглушений нет, «Папка создана» */
+    folders_test_push();
+    fold_test_ready();
+    guild_order_test_hold(true);
+    O.demo = false; g_http_guard = fn_guard; fn_npath = 0;
+    fn_drag(19, 7, true);
+    key(K_ENTER, 0);                             /* фокус в поле названия: Enter - «Создать» */
+    f = folder_of(2000);
+    char nm[64];
+    guild_folder_name(2000, nm, sizeof nm);
+    bool c2 = f && f->n == 2 && f->id > 5 && !f->name && !nm[0] && fn_npath == 0 && !guild_find(2000)->muted && on_screen("Папка создана") && guild_order_busy();
+    guild_order_test_reply(200, NULL);
+    c2 = c2 && !guild_order_busy() && pb_roundtrip() && pb_relogin();
+    check(c2, "№2 новая папка без названия и без «Не беспокоить»: папка без поля 3, заглушений нет, «Папка создана», protobuf и второй вход");
+    O.demo = true; g_http_guard = NULL;
+    ui_notice_clear();
+    guild_order_test_hold(false);
+    folders_test_pop();
+
+    /* 4. отказ Discord: папка откатывается, заглушение тоже; причины на экране */
+    folders_test_push();
+    fold_test_ready();
+    guild_order_test_hold(true);
+    rail_str(r0, sizeof r0);
+    O.demo = false; g_http_guard = fn_guard; fn_npath = 0; g_http_fake_status = 500;
+    fn_drag(19, 7, true);
+    key(K_TAB, 0); key(K_CHAR, ' '); key(K_ENTER, 0);
+    g_http_fake_status = 0;
+    CW = 160;
+    bool rb = guild_order_busy() && guild_in_folder(2000) && folder_of(2000)->n == 2 && fn_sent(2000) && fn_sent(2200) && !guild_find(2000)->muted && !guild_find(2200)->muted &&
+              on_screen("заглушить сервер");
+    guild_order_test_reply(403, "{\"message\":\"Missing Access\",\"code\":50001}");
+    rail_str(r1, sizeof r1);
+    rb = rb && !guild_order_busy() && !strcmp(r0, r1) && !guild_in_folder(2000) && on_screen("изменения папок серверов не сохранены") && pb_relogin();
+    CW = 120;
+    check(rb, "№2 новая папка: отказ Discord - папки нет, полоса как была; отказ заглушения - серверы не заглушены; причины на экране");
+    O.demo = true; g_http_guard = NULL;
+    ui_notice_clear();
+    guild_order_test_hold(false);
+    folders_test_pop();
+
+    /* 5. на папку и на сервер в раскрытой папке - как раньше, без окна */
+    folders_test_push();
+    fold_test_ready();
+    fn_drag(19, 11, true);                       /* 2200 -> середина плитки папки без имени */
+    bool p1 = !on_screen("Новая папка") && folder_of(2200) == folder_of(2600) && folder_of(2600)->n == 3;
+    /* теперь: 2000 (6), [2600 2700 2200] (10), «Игры» (14) */
+    lclick(3, 15);                               /* раскрыть «Игры»: 2100 (18), 2500 (22) */
+    fn_drag(7, 19, true);                        /* 2000 -> середина 2100 в раскрытой папке */
+    bool p2 = !on_screen("Новая папка") && folder_of(2000) == folder_of(2100) && folder_of(2100)->id == 1;
+    check(p1 && p2 && rail_sane("на папку и в папку"), "№2 сервер на папку и на сервер в раскрытой папке - в папку, как раньше, без окна «Новая папка»");
+    if (!(p1 && p2)) { say("    на папку %d в папку %d\n", p1, p2); scr_print(&cur); }
+    folders_test_pop();
+
+    CW = 120; CH = 34;
+    hover_off();
+    ui_notice_clear();
+    ui_fold_close_all();
+    lclick(3, 11); lclick(3, 11);                /* щелчок по папке (раскрыть и свернуть) - фокус на серверах */
+    ui_fold_close_all();
+    key(K_HOME, 0);                              /* как было: «Уютный уголок», #general, фокус в поле ввода */
+    key(K_DOWN, 0);
+    key(K_TAB, 0);
+    key(K_ENTER, 0);
+}
+
 /* Большая полоса: 64 сервера (со значком, без значка, значок «качается»), папки на 12 и 10 (с id и без,
  * с именем и без), случайные перестановки, протяжки мышью, правки, узкое окно; после каждого шага —
  * целостность, каждые 25 — «второй вход». Щелчки по серверам открывают их каналы (лента перезагружается) —
@@ -1464,7 +1651,7 @@ static void t_folders_stress(void) {
     for (int step = 0; step < 1500 && st; step++) {
         int op = (int)rnd(10);
         u64 src = S.guilds[rnd((u32)S.nguilds)].id, ref = S.guilds[rnd((u32)S.nguilds)].id;
-        if (op < 5) { if (guild_move(src, rnd(3) == 0, (int)rnd(3), rnd(5) ? ref : src, rnd(2), err, sizeof err)) ops++; }
+        if (op < 5) { if (guild_move(src, rnd(3) == 0, (int)rnd(4), rnd(5) ? ref : src, rnd(2), err, sizeof err)) ops++; }
         else if (op == 5) { if (guild_unfold(src, err, sizeof err)) ops++; }
         else if (op == 6 && rnd(4) == 0) { if (guild_folder_ungroup(src, err, sizeof err)) ops++; }
         else if (op == 7) { if (guild_folder_edit(src, rnd(2) ? "Переименовано" : "", rnd(2) ? (i64)0x3498db : FOLDER_COLOR_KEEP, err, sizeof err)) ops++; }
@@ -4795,6 +4982,7 @@ int selftest(void) {
     term_puts("\n  порядок серверов:\n");    t_guild_order();
     term_puts("\n  папки серверов:\n");      t_folders();
     term_puts("\n  папки: перетаскивание:\n"); t_folders_drag();
+    term_puts("\n  папки: новая папка:\n");   t_folder_new();
     term_puts("\n  размеры экрана:\n");      t_sizes();
     term_puts("\n  фокус:\n");               t_focus();
     term_puts("\n  прокрутка:\n");           t_scroll();

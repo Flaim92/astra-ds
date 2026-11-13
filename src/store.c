@@ -2946,7 +2946,7 @@ void invite_create(u64 cid, int max_age_s, int max_uses) {
 /* ---------- заглушить и уровень уведомлений (PATCH /users/@me/guilds/{g|@me}/settings) ---------- */
 /* Ревью 9 М5: модель меняется сразу; при ошибке ответа — откат к прежнему значению (кольцо записей). */
 enum { SR_GMUTE, SR_CMUTE, SR_GNOTIFY, SR_CNOTIFY };
-#define STR_MAX 8
+#define STR_MAX 256                             /* «Не беспокоить» папки - по записи на каждый её сервер (до 200) */
 static struct { u64 id; u8 kind, old; const char *what; unsigned gen; } STR[STR_MAX];
 static unsigned sr_gen;
 static void on_settings(Resp *r, void *ctx) {
@@ -4321,6 +4321,19 @@ static void fd_materialize(void) {
     for (int i = 0; i < n; i++) if (r[i].fk == RAIL_NEW) fd_insert(m++, fd_single(r[i].gid));
     free(r);
 }
+static i64 fd_new_id(void) {
+    u64 x = (u64)wall_ms() * 0x9E3779B97F4A7C15ULL;
+    for (;;) {
+        i64 id = (i64)(x >> 33) + 1;            /* как у официального клиента: случайное до 2^32 */
+        bool used = false;
+        for (int k = 0; k < nfd; k++) if (FD[k].id == id) used = true;
+        if (!used) return id;
+        x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+    }
+}
+static void meta_put(GuildFolder *f, int field, const Buf *val);
+static void fd_set_name(GuildFolder *f, const char *nm);
+static const char *gm_new_name;                 /* название новой папки (GM_NEWFOLDER), уже очищенное; NULL - без */
 bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, size_t errn) {
     if (err && errn) *err = 0;
     if (!fd_known || fd_lossy) { if (err) snprintf(err, errn, "%s", ui_tr("порядок серверов ещё не получен от Discord")); return false; }
@@ -4334,6 +4347,7 @@ bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, 
     if (whole && sfk < 0) whole = false;
     if (whole && sfk == rfk) return false;      /* папку — относительно самой себя */
     if (how == GM_INTO && (whole || rfk < 0)) return false;
+    if (how == GM_NEWFOLDER && (whole || rfk >= 0)) return false;   /* только сервер на сервер вне папок */
     if (src == ref) {
         /* ref == src: сервер брошен на плитку своей же папки (у плитки ref — первый сервер папки, а это часто он
          * сам) — в неё (GM_INTO) или перед / после неё (ref_top). ref здесь означает только папку: ориентир —
@@ -4364,7 +4378,15 @@ bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, 
         if (in) gids_insert(&FD[rk], rq + (how == GM_AFTER), src);
         else { fd_insert(rk + (how == GM_AFTER), moved); memset(&moved, 0, sizeof moved); }
     } else if (how == GM_INTO) gids_insert(&FD[rk], FD[rk].n, src);
-    else return false;
+    else {                                      /* GM_NEWFOLDER: ref и src - новая папка на месте ref */
+        FD[rk].id = fd_new_id();
+        Buf m = {0};
+        pbw_wrapped_u(&m, 2, (u64)FD[rk].id);
+        meta_put(&FD[rk], 2, &m);
+        buf_free(&m);
+        if (gm_new_name && *gm_new_name) fd_set_name(&FD[rk], gm_new_name);
+        gids_insert(&FD[rk], FD[rk].n, src);
+    }
     fd_entry_free(&moved);
     fd_encode(&after);
     bool same = before.len == after.len && (!before.len || !memcmp(before.p, after.p, before.len));
@@ -4448,19 +4470,21 @@ static bool fd_edit_run(u64 gid, void (*fn)(void *), void *arg, char *err, size_
     gf_send();
     return true;
 }
+/* Название папки (поле 3, StringValue) и его показ; nm уже очищено folder_name_clean, "" - убрать. */
+static void fd_set_name(GuildFolder *f, const char *nm) {
+    Buf w = {0}, v = {0};
+    if (*nm) { pbw_len(&w, 1, nm, strlen(nm)); pbw_len(&v, 3, w.p, w.len); }
+    meta_put(f, 3, *nm ? &v : NULL);
+    buf_free(&w); buf_free(&v);
+    free(f->name);
+    f->name = NULL;
+    if (*nm) { char *t = san(nm, false); if (strlen(t) > 64) { size_t q = 64; while (q && ((unsigned char)t[q] & 0xC0) == 0x80) q--; t[q] = 0; } f->name = t; }
+}
 typedef struct { const char *name; i64 color; } FolderEdit;
 static void fe_apply(void *a) {
     const FolderEdit *e = a;
     GuildFolder *f = &FD[fd_edit_k];
-    if (e->name) {
-        Buf w = {0}, v = {0};
-        if (*e->name) { pbw_len(&w, 1, e->name, strlen(e->name)); pbw_len(&v, 3, w.p, w.len); }
-        meta_put(f, 3, *e->name ? &v : NULL);
-        buf_free(&w); buf_free(&v);
-        free(f->name);
-        f->name = NULL;
-        if (*e->name) { char *t = san(e->name, false); if (strlen(t) > 64) { size_t q = 64; while (q && ((unsigned char)t[q] & 0xC0) == 0x80) q--; t[q] = 0; } f->name = t; }
-    }
+    if (e->name) fd_set_name(f, e->name);
     if (e->color == FOLDER_COLOR_DEFAULT) { meta_put(f, 4, NULL); f->color = 0; f->has_color = false; }
     else if (e->color >= 0) {
         Buf v = {0};
@@ -4497,6 +4521,45 @@ bool guild_unfold(u64 gid, char *err, size_t errn) {
     return guild_move(gid, false, GM_AFTER, anchor, true, err, errn);
 }
 bool guild_in_folder(u64 gid) { int k = fd_find(gid, NULL); return k >= 0 && fd_real(&FD[k]); }
+/* Новая папка из двух серверов вне папок: на месте ref, в ней ref и src, с названием (можно пустое).
+ * Одна запись поля 14, как у перестановки; отказ Discord - откат, причина на экране. */
+bool guild_folder_create(u64 src, u64 ref, const char *name, char *err, size_t errn) {
+    char nm[FOLDER_NAME_MAX * 4 + 1] = "";
+    if (err && errn) *err = 0;
+    if (name && !folder_name_clean(name, nm, sizeof nm, err, errn)) return false;
+    gm_new_name = nm;
+    bool ok = guild_move(src, false, GM_NEWFOLDER, ref, false, err, errn);
+    gm_new_name = NULL;
+    if (ok) gf_edit = true;                     /* отказ - «изменения папок серверов не сохранены» */
+    return ok;
+}
+/* «Не беспокоить» папки: все её серверы заглушены (из пришедших; хотя бы один есть). */
+bool guild_folder_muted(u64 gid) {
+    int k = fd_find(gid, NULL), got = 0;
+    if (k < 0) return false;
+    for (int q = 0; q < FD[k].n; q++) {
+        Guild *g = guild_find(FD[k].gids[q]);
+        if (!g) continue;
+        if (!g->muted) return false;
+        got++;
+    }
+    return got > 0;
+}
+/* Заглушить или включить все серверы папки, где gid (тем же PATCH .../settings, что меню сервера); только те,
+ * у кого состояние другое. Вернуть число запросов. */
+int guild_folder_mute(u64 gid, bool mute) {
+    int k = fd_find(gid, NULL), n = 0;
+    if (k < 0) { Guild *g = guild_find(gid); if (!g || (bool)g->muted == mute) return 0; mute_guild(gid, mute); return 1; }
+    int cnt = FD[k].n;
+    u64 *ids = xmalloc((size_t)(cnt > 0 ? cnt : 1) * sizeof(u64));   /* копия: ответ может поменять FD */
+    memcpy(ids, FD[k].gids, (size_t)cnt * sizeof(u64));
+    for (int q = 0; q < cnt; q++) {
+        Guild *g = guild_find(ids[q]);
+        if (g && (bool)g->muted != mute) { mute_guild(ids[q], mute); n++; }
+    }
+    free(ids);
+    return n;
+}
 void guild_folder_name(u64 gid, char *out, size_t n) {   /* название целиком (для правки), без управляющих символов */
     if (!n) return;
     out[0] = 0;
