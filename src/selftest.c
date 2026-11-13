@@ -790,6 +790,37 @@ static void t_guild_order(void) {
     check(w3, "№2 запись порядка: две перестановки подряд — вторая уходит после ответа на первую, итог как в ответе Discord");
     guild_order_test_hold(false);
     folders_test_pop();
+
+    /* 8. второй вход: наш же protobuf поля 14 приходит в READY нового сеанса (тот же разбор, что folders_slim) —
+     * порядок известен, записывать можно, перестановка и мышь работают; цепочка READY -> запись -> READY дважды */
+    folders_test_push();
+    bool r1 = guild_move(2500, false, GM_BEFORE, 2000, true, err, sizeof err) && rail_is("2500 2000 [2600 2700] [2100]");
+    char before[512], after[512];
+    for (int round = 0; round < 2 && r1; round++) {
+        Buf pb8 = {0}, b8 = {0};
+        guild_folders_pb(&pb8);                  /* ровно то, что ушло бы в PATCH settings-proto */
+        base64_enc(pb8.p, pb8.len, &b8);
+        buf_put(&b8, "", 1);
+        rail_str(before, sizeof before);
+        folders_test_proto(b8.p);                /* новый сеанс: READY.user_settings_proto */
+        rail_str(after, sizeof after);
+        buf_free(&pb8); buf_free(&b8);
+        r1 = !strcmp(before, after) && !guild_order_busy() && pb_roundtrip();
+        if (round == 0) r1 = r1 && guild_move(2500, false, GM_INTO, 2100, false, err, sizeof err) && rail_is("2000 [2600 2700] [2100 2500]");
+        else r1 = r1 && guild_move(2000, false, GM_AFTER, 2600, true, err, sizeof err) && rail_is("[2600 2700] 2000 [2100 2500]") &&
+                  guild_move(2000, false, GM_BEFORE, 2600, true, err, sizeof err) && rail_is("2000 [2600 2700] [2100 2500]");
+        if (!r1) say("    круг %d: %s / %s / %s\n", round, before, after, err);
+    }
+    check(r1, "№2 второй вход: наш protobuf поля 14 в READY — порядок тот же, guild_move работает (READY -> запись -> READY дважды)");
+    CW = 120; CH = 34;
+    hover_off();
+    cur_take();
+    mouse_at(1, 3, 7);                           /* после «второго входа»: взять «Уютный уголок» */
+    mouse_at(6, 3, 12);
+    mouse_at(6, 3, 15);
+    mouse_at(7, 3, 15);
+    check(rail_is("[2600 2700] [2100 2500 2000]"), "№2 второй вход: мышью перетаскивание сервера после READY с нашей записью");
+    folders_test_pop();
     /* как было до проверки: «Уютный уголок», #general, фокус в поле ввода */
     hover_off();
     ui_notice_clear();
