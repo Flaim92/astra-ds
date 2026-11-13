@@ -455,6 +455,8 @@ void guild_folders_pb(Buf *out);                           /* protobuf Preloaded
 #define FOLDER_COLOR_DEFAULT (-2)
 bool guild_folder_edit(u64 gid, const char *name, i64 color, char *err, size_t errn);
 bool guild_folder_ungroup(u64 gid, char *err, size_t errn);   /* распустить: серверы остаются на месте по порядку */
+bool guild_unfold(u64 gid, char *err, size_t errn);        /* «Убрать из папки»: сервер — отдельно, сразу после папки */
+bool guild_in_folder(u64 gid);                             /* сервер в папке (не одиночная запись) */
 void guild_folder_name(u64 gid, char *out, size_t n);         /* название папки целиком (GuildFolder.name — до 64 байт) */
 bool guild_order_busy(void);                               /* запись порядка ещё не подтверждена */
 /* №119 слова-тревоги: только в памяти; сообщение со словом — как упоминание (подсветка и счётчик) */

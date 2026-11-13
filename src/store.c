@@ -4324,7 +4324,7 @@ static void fd_materialize(void) {
 bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, size_t errn) {
     if (err && errn) *err = 0;
     if (!fd_known || fd_lossy) { if (err) snprintf(err, errn, "%s", ui_tr("порядок серверов ещё не получен от Discord")); return false; }
-    if (!guild_find(src) || !guild_find(ref) || (src == ref && how != GM_INTO)) return false;
+    if (!guild_find(src) || !guild_find(ref) || (src == ref && (whole || (how != GM_INTO && !ref_top)))) return false;
     RailEnt *r;
     int n = guild_rail(&r), si = -1, ri = -1;
     for (int i = 0; i < n; i++) { if (r[i].gid == src) si = i; if (r[i].gid == ref) ri = i; }
@@ -4334,6 +4334,17 @@ bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, 
     if (whole && sfk < 0) whole = false;
     if (whole && sfk == rfk) return false;      /* папку — относительно самой себя */
     if (how == GM_INTO && (whole || rfk < 0)) return false;
+    if (src == ref) {
+        /* ref == src: сервер брошен на плитку своей же папки (у плитки ref — первый сервер папки, а это часто он
+         * сам) — в неё (GM_INTO) или перед / после неё (ref_top). ref здесь означает только папку: ориентир —
+         * другой сервер этой папки. Иначе после изъятия src ориентир не находился: fd_find -> -1, запись в
+         * FD[-1] (порча кучи, падение). Папки нет (одиночный) или в ней больше никого — менять нечего. */
+        u64 other = 0;
+        int k = sfk >= 0 ? fd_find(src, NULL) : -1;
+        for (int q = 0; k >= 0 && q < FD[k].n && !other; q++) if (FD[k].gids[q] != src && guild_find(FD[k].gids[q])) other = FD[k].gids[q];
+        if (!other) return false;
+        ref = other;
+    }
     bool first = !fdc_on;
     if (first) { FDC = fd_dup(FD, nfd); nfdc = nfd; fdc_on = true; }
     Buf before = {0}, after = {0};
@@ -4474,6 +4485,18 @@ static void fu_apply(void *a) {                  /* папка -> её серв�
     fd_entry_free(&e);
 }
 bool guild_folder_ungroup(u64 gid, char *err, size_t errn) { return fd_edit_run(gid, fu_apply, NULL, err, errn); }
+/* «Убрать из папки»: сервер встаёт отдельным сразу после своей папки. Единственный сервер папки — папка
+ * распускается (сервер остаётся на её месте). */
+bool guild_unfold(u64 gid, char *err, size_t errn) {
+    if (err && errn) *err = 0;
+    int k = fd_find(gid, NULL);
+    if (k < 0 || !fd_real(&FD[k]) || !guild_find(gid)) return false;
+    u64 anchor = 0;
+    for (int q = 0; q < FD[k].n && !anchor; q++) if (FD[k].gids[q] != gid && guild_find(FD[k].gids[q])) anchor = FD[k].gids[q];
+    if (!anchor) return guild_folder_ungroup(gid, err, errn);
+    return guild_move(gid, false, GM_AFTER, anchor, true, err, errn);
+}
+bool guild_in_folder(u64 gid) { int k = fd_find(gid, NULL); return k >= 0 && fd_real(&FD[k]); }
 void guild_folder_name(u64 gid, char *out, size_t n) {   /* название целиком (для правки), без управляющих символов */
     if (!n) return;
     out[0] = 0;

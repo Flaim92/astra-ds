@@ -155,7 +155,7 @@ enum { MI_REPLY = 1, MI_EDIT, MI_DELETE, MI_REACT, MI_COPY,
        MI_FORWARD, MI_REACTS,                                /* пакет А: переслать, кто поставил реакцию */
        MI_G_MUTE, MI_G_NOTIFY, MI_C_MUTE, MI_C_NOTIFY,       /* заглушить, уровень уведомлений */
        MI_THREAD, MI_T_JOIN, MI_GDM_ADD, MI_GDM_LEAVE, MI_FOCUS30, MI_FOCUS60, MI_FOCUS120, MI_FOCUSOFF, MI_C_VSTATUS, MI_STATUS_SET, MI_C_ARCH, MI_T_RENAME, MI_T_ARCH, MI_T_LOCK, MI_T_MEMB, MI_GDM_RENAME,                                 /* пакет Б: создать ветку; вступить/покинуть ветку */
-       MI_MRETRY, MI_MDISCARD,
+       MI_MRETRY, MI_MDISCARD, MI_G_UNFOLD,
        MI_V_VOL, MI_V_UP, MI_V_DN, MI_V_MUTE, MI_V_PROF, MI_V_MOVE, MI_V_SMUTE, MI_V_MIC, MI_V_DEAF,
        MI_F_RENAME, MI_F_COLOR, MI_F_UNGROUP, MI_FC_DEF, MI_FC_0 };   /* №2 меню папки серверов; MI_FC_0 + i — цвет FOLD_PAL[i] */   /* меню участника голосового канала */                             /* неотправленное: повторить, отменить */
 enum { MENU_MSG = 1, MENU_SET, MENU_FRIEND, MENU_STATUS, MENU_GUILD, MENU_CHAN, MENU_VMEM, MENU_FOLDER, MENU_FCOLOR };
@@ -3364,7 +3364,8 @@ static const char PANIC_HERE[] = "";
 static const HelpItem HELP[] = {
     { NULL, "МЫШЬ" },
     { "левый щелчок", "сервер, канал, сообщение, кнопка; категория, папка - свернуть/развернуть; голосовой канал - экран канала с кнопкой \"Присоединиться\"" },
-    { "правый щелчок", "меню сообщения (ответить, изменить, удалить, реакция, копировать) или папки серверов" },
+    { "правый щелчок", "меню сообщения (ответить, изменить, удалить, реакция, копировать), сервера, папки" },
+    { "протяжка сервера", "на плитку папки - в неё; выше плитки или под папку - из неё" },
     { "колесо", "листать ленту, каналы, серверы, справку" },
     { "щелчок по реакции", "поставить или снять свою" },
     { NULL, "ПАНЕЛИ" },
@@ -3804,6 +3805,7 @@ static int menu_items(int kind, const Message *m, int *ids, const char **names, 
     }
     if (kind == MENU_GUILD) {
         u64 g = cur_guild_id();
+        if (guild_in_folder(g)) { ids[n] = MI_G_UNFOLD; danger[n] = false; names[n++] = TR("Убрать из папки"); }
         ids[n] = MI_G_INV; danger[n] = false; names[n++] = TR("Пригласить людей");
         if (can_manage_guild(g)) { ids[n] = MI_G_SET; danger[n] = false; names[n++] = TR("Настройки сервера"); }
         if (can_manage_channels(g)) {
@@ -4676,6 +4678,8 @@ static void tab_close(int i) {
     if (was == S.open_ch && TB.n) tab_go(i < TB.n ? i : TB.n - 1);
     U.dirty = true;
 }
+void ui_tabs_test_only_open(void);               /* selftest: вкладки — только открытый канал (после проверок со щелчками) */
+void ui_tabs_test_only_open(void) { TB.n = 0; if (S.open_ch) tab_add(S.open_ch); U.dirty = true; }
 /* Полоса вкладок в шапке (когда их две и больше): «#имя x»; выбранная — подсвечена. */
 static void draw_tabs(int x0, int x1) {
     int x = x0;
@@ -7542,18 +7546,24 @@ static void draw_search(int x, int w, int H) {
  * Значок с картинкой — квадрат из img.c (в окне поверх — мелкая сетка, полосой подряд идущих значков);
  * без картинки — сокращение названия в скобках, как на эталоне: [CS] [M] [GT]. */
 #define RAIL_W 10
-/* №2: развёрнутые папки (по id) — только в памяти */
+/* №2: развёрнутые папки (fold_id) — только в памяти. Папка без id — по её первому серверу, а не по номеру
+ * записи: номера сдвигаются при любой перестановке (и при fd_materialize новых серверов сверху), и раскрытой
+ * оказывалась бы соседняя папка. */
 static i64 fold_open_ids[16];
+static i64 fold_id(const GuildFolder *fd, int k) {
+    if (fd[k].id) return fd[k].id;
+    return fd[k].n ? -(i64)(fd[k].gids[0] & 0x7FFFFFFFFFFFFFFFull) : 0;
+}
 static bool folder_open(i64 id) { for (int i = 0; i < 16; i++) if (fold_open_ids[i] == id && id) return true; return false; }
 static void folder_toggle(int k) {
     const GuildFolder *fd = NULL;
     int n = guild_folders(&fd);
     if (k < 0 || k >= n) return;
-    i64 id = fd[k].id ? fd[k].id : -(i64)(k + 1);
+    i64 id = fold_id(fd, k);
+    if (!id) return;
     for (int i = 0; i < 16; i++) if (fold_open_ids[i] == id) { fold_open_ids[i] = 0; return; }
     for (int i = 0; i < 16; i++) if (!fold_open_ids[i]) { fold_open_ids[i] = id; return; }
 }
-static i64 fold_id(const GuildFolder *fd, int k) { return fd[k].id ? fd[k].id : -(i64)(k + 1); }   /* как в fold_open_ids */
 /* Клавиатура: курсор на плитке папки (fold_id; 0 — курсор на выбранном сервере). Курсор на папке сервер не
  * меняет: Enter раскрывает и сворачивает, m — меню папки, Alt+Up/Down — двигает папку целиком. */
 static i64 rail_fcur;
@@ -7739,6 +7749,8 @@ bool ui_fold_tile(int fk, int K, ImgCell *out, u32 *bg) {
     *bg = fold_bg(&fd[fk], false);
     return fold_compose(&fd[fk], K, out);
 }
+void ui_fold_close_all(void);                    /* selftest: все папки свёрнуты */
+void ui_fold_close_all(void) { memset(fold_open_ids, 0, sizeof fold_open_ids); rail_fcur = 0; }
 bool ui_fold_open(int fk);
 bool ui_fold_open(int fk) {
     const GuildFolder *fd = NULL;
@@ -7782,7 +7794,7 @@ static int rail_items(RItem **out) {
         short idx = (short)(g - S.guilds + 1);
         if (fk < 0 || fk >= nfd) { it[ni++] = (RItem){ 0, idx, -1, re[i].gid }; continue; }
         if (!i || re[i - 1].fk != fk) it[ni++] = (RItem){ 1, 0, (short)fk, re[i].gid };
-        if (folder_open(fd[fk].id ? fd[fk].id : -(i64)(fk + 1))) it[ni++] = (RItem){ 0, idx, (short)fk, re[i].gid };
+        if (folder_open(fold_id(fd, fk))) it[ni++] = (RItem){ 0, idx, (short)fk, re[i].gid };
     }
     free(re);
     *out = it;
@@ -7796,6 +7808,22 @@ static int nrh;
  * левой — тащим, отпускание над полосой — guild_move. */
 static struct { bool armed, on, whole, toggled; u64 gid; int fk, x0, y0, x, y; } GD;
 typedef struct { int how; u64 ref; bool top; int line_y, box_y; } RailDrop;
+static bool fold_has(int fk, u64 g) {            /* сервер g в папке fk */
+    const GuildFolder *fd = NULL;
+    int n = guild_folders(&fd);
+    for (int q = 0; fk >= 0 && fk < n && q < fd[fk].n; q++) if (fd[fk].gids[q] == g) return true;
+    return false;
+}
+static bool fold_last(int fk, u64 g) {           /* g — последний (из пришедших) сервер папки fk */
+    const GuildFolder *fd = NULL;
+    int n = guild_folders(&fd);
+    if (fk < 0 || fk >= n) return false;
+    for (int q = fd[fk].n - 1; q >= 0; q--) if (guild_find(fd[fk].gids[q])) return fd[fk].gids[q] == g;
+    return false;
+}
+/* Куда ляжет сервер (или папка целиком) при отпускании над (x, y). Из раскрытой папки вынимают: вверх — на
+ * плитку этой же папки (сервер встаёт перед папкой), вниз — в промежуток под её последним сервером (после папки),
+ * или на любое место вне папки. Черта внутри папки — короткая (по значку), черта общего списка — во всю колонку. */
 static bool rail_target(int x, int y, RailDrop *d) {
     if (x < 0 || x >= RAIL_W || !nrh) return false;
     memset(d, 0, sizeof *d);
@@ -7810,7 +7838,8 @@ static bool rail_target(int x, int y, RailDrop *d) {
     d->ref = t->gid;
     if (t->kind == 1) {                         /* плитка папки */
         bool open = k + 1 < nrh && RH[k + 1].it.kind == 0 && RH[k + 1].it.fk == t->fk;
-        if (r == 0 || (r == 1 && GD.whole)) { d->how = GM_BEFORE; d->top = true; d->line_y = y0 - 1; }
+        bool own = !GD.whole && fold_has(t->fk, GD.gid);   /* свой сервер на плитку своей папки — вынуть наверх */
+        if (r == 0 || (r == 1 && (GD.whole || own))) { d->how = GM_BEFORE; d->top = true; d->line_y = y0 - 1; }
         else if (r == 1) { d->how = GM_INTO; d->box_y = y0; }
         else if (open && !GD.whole) { d->how = GM_BEFORE; d->top = false; d->line_y = y0 + 3; }   /* в начало папки */
         else { d->how = GM_AFTER; d->top = true; d->line_y = y0 + 3; }
@@ -7822,6 +7851,7 @@ static bool rail_target(int x, int y, RailDrop *d) {
         d->top = GD.whole;
         if (r == 0) { d->how = GM_BEFORE; d->line_y = y0 - 1; }
         else { d->how = GM_AFTER; d->line_y = y0 + 3; }
+        if (!GD.whole && r == 3 && fold_last(t->fk, t->gid)) d->top = true;   /* промежуток под папкой — после неё */
     }
     return true;
 }
@@ -8080,7 +8110,8 @@ static void draw_rail(int H) {
     free(it);
     RailDrop dd;
     if (GD.on && rail_target(GD.x, GD.y, &dd)) {   /* куда ляжет перетаскиваемый: черта или рамка */
-        if (dd.line_y >= 0 && dd.line_y < H) g_rect(1, dd.line_y, 6, 1, C_WHITE);
+        bool inner = !dd.top && dd.how != GM_INTO;   /* место внутри папки — короткая черта по значку */
+        if (dd.line_y >= 0 && dd.line_y < H) g_rect(inner ? 2 : 0, dd.line_y, inner ? 4 : RAIL_W - 1, 1, C_WHITE);
         if (dd.box_y >= 0) for (int r = 0; r < 3 && dd.box_y + r < H; r++) { g_ch(1, dd.box_y + r, '[', C_WHITE, AT_B); g_ch(6, dd.box_y + r, ']', C_WHITE, AT_B); }
     }
     /* «+» добавить сервер: серый квадрат с зелёным плюсом */
@@ -10932,6 +10963,12 @@ static void msg_action(Message *m, int what) {
                 g, what == MI_G_INV ? ch : 0);
         return;
     }
+    case MI_G_UNFOLD: {                          /* №2: сервер — отдельно, сразу после своей папки */
+        char err[160] = "";
+        if (!guild_unfold(cur_guild_id(), err, sizeof err) && err[0]) ui_notice("%s", err);
+        U.dirty = true;
+        return;
+    }
     case MI_G_MOVE: U.moving = !U.moving; U.focus = F_CHANNELS; ui_notice(U.moving ? TR("перестановка: Up/Down - канал, Alt+Up/Down - переставить, Esc - готово") : TR("перестановка закончена")); return;
     case MI_C_EDIT: case MI_C_PERMS: case MI_C_INV: case MI_C_DEL: {
         Channel *c = chan_find(U.menu_cid);
@@ -11463,6 +11500,9 @@ static void mouse(const Key *k) {
         else if (h->act == A_ROW && h->arg >= 0 && h->arg < U.nrows && (U.rows[h->arg].kind == R_CHAN || U.rows[h->arg].kind == R_HEADER)) {
             U.menu_cid = U.rows[h->arg].id;          /* правый щелчок по каналу/категории — меню канала */
             menu_open(MENU_CHAN, -1, k->x, k->y);
+        } else if (h->act == A_GUILD && h->arg >= 1 && h->arg <= S.nguilds) {
+            select_guild(h->arg);                /* меню сервера действует на выбранный: сначала выбрать его */
+            menu_open(MENU_GUILD, -1, k->x, k->y);
         } else if (h->act == A_FOLDER) {          /* №2: правый щелчок по папке — её меню */
             const GuildFolder *fd = NULL;
             int n = guild_folders(&fd);

@@ -1190,6 +1190,318 @@ static void t_folders(void) {
     key(K_ENTER, 0);
 }
 
+/* №2 папки: перетаскивание в папку и из неё, «Убрать из папки», большая полоса (60+ серверов, папки на 10+).
+ * Падение у владельца: сервер, брошенный на плитку своей же папки (первый сервер раскрытой папки прямо под её
+ * плиткой), — guild_move GM_INTO с ref == src: после изъятия src ref не находился и запись шла в FD[-1]. */
+/* целостность: каждый сервер store на полосе ровно один раз, пустых записей и повторов в guild_folders нет */
+static bool rail_sane(const char *what) {
+    RailEnt *re;
+    int n = guild_rail(&re);
+    const GuildFolder *f;
+    int nf = guild_folders(&f);
+    bool ok = n == S.nguilds;
+    for (int i = 0; i < S.nguilds && ok; i++) {
+        int c = 0;
+        for (int j = 0; j < n; j++) if (re[j].gid == S.guilds[i].id) c++;
+        if (c != 1) ok = false;
+    }
+    for (int j = 0; j < n && ok; j++) {
+        if (re[j].fk >= nf) ok = false;
+        else if (re[j].fk >= 0) {
+            bool in = false;
+            for (int q = 0; q < f[re[j].fk].n; q++) if (f[re[j].fk].gids[q] == re[j].gid) in = true;
+            if (!in) ok = false;
+        }
+    }
+    int tot = 0;
+    for (int k = 0; k < nf && ok; k++) { if (f[k].n < 1) ok = false; tot += f[k].n; }
+    if (ok) {
+        u64 *all = xmalloc((size_t)(tot + 1) * sizeof(u64));
+        int m = 0;
+        for (int k = 0; k < nf; k++) for (int q = 0; q < f[k].n; q++) all[m++] = f[k].gids[q];
+        for (int a = 0; a < m && ok; a++) for (int b = a + 1; b < m; b++) if (all[a] == all[b]) { ok = false; break; }
+        free(all);
+    }
+    free(re);
+    if (!ok) { char s[2048]; rail_str(s, sizeof s); say("    полоса сломана (%s): записей %d из %d: %s\n", what, n, S.nguilds, s); }
+    return ok;
+}
+/* protobuf поля 14 -> «второй вход» (тот же разбор, что READY) -> те же байты и та же полоса */
+static bool pb_relogin(void) {
+    Buf pb = {0}, b64 = {0}, pb2 = {0};
+    char a[2048], b[2048];
+    guild_folders_pb(&pb);
+    base64_enc(pb.p, pb.len, &b64);
+    buf_put(&b64, "", 1);
+    rail_str(a, sizeof a);
+    folders_test_proto(b64.p);
+    rail_str(b, sizeof b);
+    guild_folders_pb(&pb2);
+    bool ok = pb.len == pb2.len && !memcmp(pb.p, pb2.p, pb.len) && !strcmp(a, b);
+    if (!ok) say("    второй вход: байты %d, полоса\n    %s\n    %s\n", pb.len == pb2.len && !memcmp(pb.p, pb2.p, pb.len), a, b);
+    buf_free(&pb); buf_free(&b64); buf_free(&pb2);
+    return ok;
+}
+static void fold_apply(Buf *gf) {                /* GuildFolders -> READY.user_settings_proto */
+    Buf pb = {0}, b64 = {0};
+    pbt_v(&pb, 3 << 3); pbt_v(&pb, 5);
+    pbt_l(&pb, 14, gf->p, gf->len);
+    base64_enc(pb.p, pb.len, &b64);
+    buf_put(&b64, "", 1);
+    folders_test_proto(b64.p);
+    buf_free(&pb); buf_free(&b64);
+}
+static bool white_at(const Scr *s, int x, int y) { const SC *c = scr_cell(s, x, y); return c && (c->bg >> 16 & 0xff) > 0xe0 && (c->bg >> 8 & 0xff) > 0xe0 && (c->bg & 0xff) > 0xe0; }
+void ui_fold_close_all(void);
+void ui_tabs_test_only_open(void);
+static void rclick_at(int x, int y) { cur_take(); mouse_at(3, x, y); }
+static void lclick(int x, int y) { cur_take(); mouse_at(1, x, y); mouse_at(7, x, y); }
+static u32 rnd_s = 12345;
+static u32 rnd(u32 n) { rnd_s = rnd_s * 1103515245u + 12345u; return (rnd_s >> 16) % (n ? n : 1); }
+
+static void t_folders_drag(void) {
+    char err[200];
+    const GuildFolder *f;
+    /* 1. регрессия падения (store): сервер в свою же папку — без записи за пределы, полоса цела */
+    folders_test_push();
+    fold_test_ready();
+    char r0[512], r1[512];
+    rail_str(r0, sizeof r0);
+    bool c1 = guild_move(2202, false, GM_INTO, 2202, false, err, sizeof err) && rail_sane("2202 в свою папку");
+    f = folder_of(2202);
+    c1 = c1 && f && f->n == 3 && f->gids[0] == 2205 && f->gids[1] == 2203 && f->gids[2] == 2202 && f->id == 4 && pb_relogin();
+    rail_str(r1, sizeof r1);
+    bool c2 = !guild_move(2201, false, GM_INTO, 2201, false, err, sizeof err) && !guild_move(2202, false, GM_INTO, 2205, false, err, sizeof err) &&
+              !guild_move(2200, false, GM_BEFORE, 2200, true, err, sizeof err) && rail_sane("единственный / последний в свою папку");
+    char r2[512];
+    rail_str(r2, sizeof r2);
+    c2 = c2 && !strcmp(r1, r2) && folder_of(2201)->n == 1 && folder_of(2201)->id == 3;
+    bool c3 = guild_move(2205, false, GM_BEFORE, 2205, true, err, sizeof err) && rail_sane("перед своей папкой") && folder_of(2205)->n == 1 &&
+              fold_k(2205) + 1 == fold_k(2203) && folder_of(2203)->n == 2 && pb_relogin();
+    if (!(c1 && c2 && c3)) say("    было %s\n    стало %s / %s\n", r0, r1, r2);
+    check(c1 && c2 && c3, "№2 падение: сервер на плитку своей папки (ref == src) — в конец папки или перед ней, не FD[-1]; единственный — без изменений");
+    folders_test_pop();
+
+    /* 2. мышь: раскрытая «Тройка»; первый сервер на её же плитку — вон из папки наверх (черта во всю колонку) */
+    folders_test_push();
+    fold_test_ready();
+    CW = 120; CH = 60;
+    hover_off();
+    ui_fold_close_all();
+    lclick(3, 27);                               /* раскрыть «Тройку» (y 26): 2202 (30), 2205 (34), 2203 (38), «Четвёрка» (42) */
+    int fk3 = fold_k(2202);
+    bool m0 = ui_fold_open(fk3);
+    cur_take(); mouse_at(1, 3, 31);              /* взять 2202 — первый сервер папки, прямо под плиткой */
+    mouse_at(6, 3, 29);
+    mouse_at(6, 3, 27);                          /* середина плитки своей папки */
+    cur_take();
+    bool line1 = white_at(&cur, 0, 25) && white_at(&cur, 7, 25) && !white_at(&cur, 1, 26);
+    mouse_at(7, 3, 27);
+    bool m1 = m0 && rail_sane("мышь: на свою плитку");
+    f = folder_of(2202);
+    m1 = m1 && f && f->n == 1 && !f->id && folder_of(2205)->n == 2 && fold_k(2202) == fold_k(2205) - 1;
+    check(m0 && m1 && line1, "№2 мышь: первый сервер раскрытой папки на её плитку — встаёт перед папкой (вне её), черта во всю колонку");
+    if (!(m0 && m1 && line1)) { say("    раскрыта %d итог %d черта %d\n", m0, m1, line1); scr_print(&cur); }
+    /* 2б. последний сервер раскрытой папки — в промежуток под ним: после папки; внутри — короткая черта */
+    /* теперь: 2202 (26), «Тройка» (30) раскрыта: 2205 (34), 2203 (38), «Четвёрка» (42) */
+    bool open2 = ui_fold_open(fold_k(2205));
+    cur_take(); mouse_at(1, 3, 35);              /* 2205 -> нижняя половина 2203: в папку после него */
+    mouse_at(6, 3, 37);
+    mouse_at(6, 3, 40);
+    cur_take();
+    bool shortl = white_at(&cur, 2, 41) && white_at(&cur, 5, 41) && !white_at(&cur, 0, 41) && !white_at(&cur, 7, 41);
+    mouse_at(7, 3, 40);
+    f = folder_of(2205);
+    bool in2 = f && f->n == 2 && f->gids[0] == 2203 && f->gids[1] == 2205 && rail_sane("в папке ниже");
+    /* «Тройка»: 2203 (34), 2205 (38); промежуток под 2205 — строка 41 */
+    cur_take(); mouse_at(1, 3, 39);
+    mouse_at(6, 3, 40);
+    mouse_at(6, 3, 41);
+    cur_take();
+    bool widel = white_at(&cur, 0, 41) && white_at(&cur, 7, 41);
+    mouse_at(7, 3, 41);
+    f = folder_of(2205);
+    bool out2 = f && f->n == 1 && !f->id && folder_of(2203)->n == 1 && folder_of(2203)->id == 4 && fold_k(2205) == fold_k(2203) + 1 && rail_sane("под папку");
+    check(open2 && shortl && in2 && widel && out2, "№2 мышь: внутри раскрытой папки — короткая черта; промежуток под последним сервером — из папки после неё, черта во всю колонку");
+    if (!(open2 && shortl && in2 && widel && out2)) { say("    раскрыта %d короткая %d внутри %d широкая %d наружу %d\n", open2, shortl, in2, widel, out2); scr_print(&cur); }
+    bool pr2 = pb_relogin();
+    check(pr2, "№2 мышь: после вынимания из папки protobuf поля 14 — тот же после «второго входа»");
+    folders_test_pop();
+
+    /* 3. «Убрать из папки» в меню сервера по правой кнопке: сервер сразу после папки; одиночный — пункта нет */
+    folders_test_push();
+    fold_test_ready();
+    CW = 120; CH = 60;
+    hover_off();
+    ui_fold_close_all();
+    lclick(3, 31);                               /* раскрыть «Четвёрку» (y 30): 2204 (34), 2206 (38), 2207 (42), 2208 (46) */
+    rclick_at(3, 39);                               /* правый щелчок по 2206 */
+    bool mu = on_screen("Убрать из папки") && on_screen("Кубики v");
+    click("Убрать из папки");
+    f = folder_of(2204);
+    bool u1 = mu && f && f->n == 3 && f->id == 5 && folder_of(2206)->n == 1 && fold_k(2206) == fold_k(2204) + 1 && rail_sane("убрать из папки") && pb_relogin();
+    rclick_at(3, 7);                                /* «Уютный уголок» — не в папке */
+    bool nu = on_screen("Пригласить людей") && !on_screen("Убрать из папки");
+    key(K_ESC, 0);
+    /* папка с id из одного сервера ([2201], y 22): «Убрать» — папка распускается, сервер на том же месте */
+    lclick(3, 23);
+    rclick_at(3, 27);
+    bool m1s = on_screen("Убрать из папки");
+    click("Убрать из папки");
+    f = folder_of(2201);
+    bool u2 = m1s && f && f->n == 1 && !f->id && fold_k(2201) == fold_k(2200) + 1 && rail_sane("убрать единственный");
+    check(u1 && nu && u2, "№2 правый щелчок по серверу в папке: «Убрать из папки» — сразу после папки; не в папке — пункта нет; единственный — папка распущена");
+    if (!(u1 && nu && u2)) say("    меню %d убрать %d нет пункта %d один %d\n", mu, u1, nu, u2);
+    key(K_ESC, 0);
+    folders_test_pop();
+
+    /* 4. раскрытая папка без id остаётся раскрытой после перестановок (ключ — первый сервер, не номер записи) */
+    folders_test_push();
+    {
+        static const u64 A[] = { 2600, 2700 }, B[] = { 2100, 2500 };
+        Buf gf = {0};
+        pbt_folder(&gf, A, 2, 0, NULL, false, -1);   /* без id */
+        pbt_folder(&gf, B, 2, 1, "Игры", false, -1);
+        fold_apply(&gf);
+        buf_free(&gf);
+    }
+    CW = 120; CH = 60;
+    hover_off();
+    ui_fold_close_all();
+    int ty = -1;                                 /* плитка папки без id: строка с буквами «Ра» и «Ку» */
+    cur_take();
+    for (int y = 0; y < CH && ty < 0; y++) if (strstr(scr_line(&cur, y), "Ра") && strstr(scr_line(&cur, y), "Ку")) ty = y;
+    lclick(3, ty + 1);
+    bool o1 = ui_fold_open(fold_k(2600)) && !ui_fold_open(fold_k(2100));
+    bool o2 = guild_move(2500, false, GM_BEFORE, 2600, true, err, sizeof err) && rail_sane("без id");   /* 2000 и 2500 — записями сверху */
+    o2 = o2 && ui_fold_open(fold_k(2600)) && !ui_fold_open(fold_k(2100));
+    check(o1 && o2, "№2 папка без id: раскрытая остаётся раскрытой после перестановки (номера записей сдвинулись), соседняя не раскрывается");
+    folders_test_pop();
+
+    /* 5. USER_SETTINGS_PROTO_UPDATE посреди протяжки; запись в полёте; откат */
+    folders_test_push();
+    fold_test_ready();
+    CW = 120; CH = 60;
+    hover_off();
+    ui_fold_close_all();
+    lclick(3, 27);                               /* раскрыть «Тройку» */
+    cur_take(); mouse_at(1, 3, 31);
+    mouse_at(6, 3, 29);
+    {   /* с другого устройства: «Тройка» распущена — полоса короче, плитки под курсором уже нет */
+        static const u64 A[] = { 2600, 2700 }, B[] = { 2100, 2500 }, C[] = { 2202 }, D[] = { 2205 }, E[] = { 2203 };
+        Buf gf = {0}, pb = {0}, b64 = {0};
+        pbt_folder(&gf, A, 2, 2, NULL, false, -1);
+        pbt_folder(&gf, B, 2, 1, "Игры", false, -1);
+        pbt_folder(&gf, C, 1, 0, NULL, false, -1);
+        pbt_folder(&gf, D, 1, 0, NULL, false, -1);
+        pbt_folder(&gf, E, 1, 0, NULL, false, -1);
+        pbt_l(&pb, 14, gf.p, gf.len);
+        base64_enc(pb.p, pb.len, &b64);
+        Buf j = {0};
+        buf_printf(&j, "{\"settings\":{\"type\":1,\"proto\":\"%.*s\"},\"partial\":false}", (int)b64.len, b64.p);
+        ev("USER_SETTINGS_PROTO_UPDATE", j.p);
+        buf_free(&gf); buf_free(&pb); buf_free(&b64); buf_free(&j);
+    }
+    mouse_at(6, 3, 27);
+    mouse_at(7, 3, 27);                          /* отпускание по устаревшей раскладке — без падения, полоса цела */
+    cur_take();
+    bool e1 = rail_sane("обновление посреди протяжки") && pb_relogin();
+    guild_order_test_hold(true);                 /* запись в полёте: ещё перестановки, затем отказ — всё как было */
+    char b0[1024], b1[1024];
+    rail_str(b0, sizeof b0);
+    bool e2 = guild_move(2000, false, GM_AFTER, 2203, true, err, sizeof err);
+    e2 = e2 && guild_move(2203, false, GM_INTO, 2600, false, err, sizeof err) && guild_move(2600, false, GM_INTO, 2600, false, err, sizeof err) && rail_sane("в полёте");
+    guild_order_test_reply(403, "{\"message\":\"Missing Access\",\"code\":50001}");
+    rail_str(b1, sizeof b1);
+    e2 = e2 && !guild_order_busy() && !strcmp(b0, b1) && rail_sane("откат");
+    guild_order_test_hold(false);
+    ui_notice_clear();
+    check(e1 && e2, "№2 USER_SETTINGS_PROTO_UPDATE посреди протяжки — без падения; перестановки при записи в полёте и откат при отказе — полоса цела");
+    if (!(e1 && e2)) say("    до %s\n    после %s\n", b0, b1);
+    folders_test_pop();
+    CW = 120; CH = 34;
+    hover_off();
+    ui_fold_close_all();
+    lclick(3, 11); lclick(3, 11);                /* щелчок по папке (раскрыть и свернуть) — фокус на серверах */
+    ui_fold_close_all();
+    key(K_HOME, 0);                              /* как было: «Уютный уголок», #general, фокус в поле ввода */
+    key(K_DOWN, 0);
+    key(K_TAB, 0);
+    key(K_ENTER, 0);
+}
+/* Большая полоса: 64 сервера (со значком, без значка, значок «качается»), папки на 12 и 10 (с id и без,
+ * с именем и без), случайные перестановки, протяжки мышью, правки, узкое окно; после каждого шага —
+ * целостность, каждые 25 — «второй вход». Щелчки по серверам открывают их каналы (лента перезагружается) —
+ * поэтому в конце набора проверок интерфейса. */
+static void t_folders_stress(void) {
+    char err[200];
+    folders_test_push();
+    enum { NG = 64, G0 = 5000 };
+    for (int i = 0; i < NG; i++) {
+        char j[256];
+        snprintf(j, sizeof j, "{\"id\":\"%d\",\"name\":\"%s %d\",\"icon\":%s,\"roles\":[],\"channels\":[]}", G0 + i,
+                 i % 3 == 0 ? "Сервер" : i % 3 == 1 ? "Server" : "Ёж", i, i % 2 ? "\"0123456789abcdef0123456789abcd00\"" : "null");
+        ev("GUILD_CREATE", j);
+    }
+    {
+        u64 big[12], mid[10], five[5];
+        for (int i = 0; i < 12; i++) big[i] = G0 + i;
+        for (int i = 0; i < 10; i++) mid[i] = G0 + 12 + i;
+        for (int i = 0; i < 5; i++) five[i] = G0 + 22 + i;
+        static const u64 A[] = { 2600, 2700 }, B[] = { 2100, 2500 };
+        Buf gf = {0};
+        pbt_folder(&gf, A, 2, 2, NULL, false, -1);
+        pbt_folder(&gf, big, 12, 77, "Большая", false, 0xE67E22);
+        pbt_folder(&gf, mid, 10, 0, NULL, false, -1);
+        pbt_folder(&gf, B, 2, 1, "Игры", true, 0x3BA55C);
+        pbt_folder(&gf, five, 5, 78, NULL, false, -1);
+        for (int i = 27; i < 50; i++) { u64 g = G0 + i; pbt_folder(&gf, &g, 1, 0, NULL, false, -1); }   /* 50..63 — без записи (новые) */
+        fold_apply(&gf);
+        buf_free(&gf);
+    }
+    bool st = rail_sane("большая полоса") && pb_relogin();
+    int ops = 0, bad = 0;
+    for (int step = 0; step < 1500 && st; step++) {
+        int op = (int)rnd(10);
+        u64 src = S.guilds[rnd((u32)S.nguilds)].id, ref = S.guilds[rnd((u32)S.nguilds)].id;
+        if (op < 5) { if (guild_move(src, rnd(3) == 0, (int)rnd(3), rnd(5) ? ref : src, rnd(2), err, sizeof err)) ops++; }
+        else if (op == 5) { if (guild_unfold(src, err, sizeof err)) ops++; }
+        else if (op == 6 && rnd(4) == 0) { if (guild_folder_ungroup(src, err, sizeof err)) ops++; }
+        else if (op == 7) { if (guild_folder_edit(src, rnd(2) ? "Переименовано" : "", rnd(2) ? (i64)0x3498db : FOLDER_COLOR_KEEP, err, sizeof err)) ops++; }
+        else {                                   /* мышь: раскрыть/свернуть, протяжка между случайными строками полосы */
+            CW = 40 + (int)rnd(100); CH = 14 + (int)rnd(50);
+            cur_take();
+            int y1 = (int)rnd((u32)CH), y2 = (int)rnd((u32)CH + 4) - 2;
+            if (op == 8) { mouse_at(1, 3, y1); mouse_at(7, 3, y1); }
+            else { mouse_at(1, 3, y1); mouse_at(6, 3, (y1 + y2) / 2); mouse_at(6, 2 + (int)rnd(6), y2); mouse_at(7, 2 + (int)rnd(6), y2); }
+            if (rnd(2)) key(K_ESC, 0);          /* щелчок мог открыть окно («+») или меню */
+            if (rnd(3) == 0) { int dir = rnd(2) ? K_UP : K_DOWN; Key k = { .code = dir, .alt = true }; ui_feed_key(&k); }
+            ops++;
+        }
+        if (!rail_sane("случайный шаг")) { st = false; say("    шаг %d операция %d\n", step, op); }
+        if (st && step % 25 == 0 && !pb_relogin()) { st = false; bad++; }
+    }
+    CW = 40; CH = 16;
+    cur_take();
+    bool narrow = scr_grid_ok(&cur, "узкое окно, папки");
+    check(st && narrow && ops > 300, "№2 64 сервера, папки на 12/10/5 (с id и без), 1500 случайных перестановок, протяжек мышью и правок: полоса цела, «второй вход» сходится, узкое окно ровное");
+    if (!(st && narrow)) say("    операций %d, второй вход не сошёлся %d, узкое %d\n", ops, bad, narrow);
+    key(K_ESC, 0); key(K_ESC, 0);
+    for (int i = 0; i < NG; i++) { char j[64]; snprintf(j, sizeof j, "{\"id\":\"%d\"}", G0 + i); ev("GUILD_DELETE", j); }
+    folders_test_pop();
+    CW = 120; CH = 34;
+    hover_off();
+    ui_notice_clear();
+    ui_fold_close_all();
+    lclick(3, 11); lclick(3, 11);                /* щелчок по папке (раскрыть и свернуть) — фокус на серверах */
+    ui_fold_close_all();
+    key(K_HOME, 0);                             /* как было: «Уютный уголок», #general, фокус в поле ввода */
+    key(K_DOWN, 0);
+    key(K_TAB, 0);
+    key(K_ENTER, 0);
+    ui_tabs_test_only_open();                    /* щелчки по серверам открывали их каналы — вкладки */
+}
+
 /* Клавиатура (DESIGN.md раздел 13) — по сообщениям, F-клавиши, Home/End, русская раскладка. */
 static void t_keys(void) {
     const int W = 120, H = 34;
@@ -4482,6 +4794,7 @@ int selftest(void) {
     term_puts("\n  данные и разбор:\n");     t_data();
     term_puts("\n  порядок серверов:\n");    t_guild_order();
     term_puts("\n  папки серверов:\n");      t_folders();
+    term_puts("\n  папки: перетаскивание:\n"); t_folders_drag();
     term_puts("\n  размеры экрана:\n");      t_sizes();
     term_puts("\n  фокус:\n");               t_focus();
     term_puts("\n  прокрутка:\n");           t_scroll();
@@ -4511,6 +4824,7 @@ int selftest(void) {
     term_puts("\n  слеш-команды и модерация:\n"); t_slash_mod();
     term_puts("\n  файл со спойлером:\n");  t_send_ex();
     term_puts("\n  список участников сервера:\n"); t_memlist();
+    term_puts("\n  папки: большая полоса:\n"); t_folders_stress();
     term_puts("\n  автообновление:\n");     update_selftest(check);
     demo_en_selftest(check);
 #ifdef ASTRA_VIDEO
