@@ -781,6 +781,12 @@ void voice_toggle_mute(void);
 void voice_toggle_deaf(void);
 void voice_set_volume(u64 user, float vol);
 float voice_get_volume(u64 user);
+/* звук чужой трансляции при просмотре: своя громкость 0..2 (отдельно от голоса того же человека) и «выключен»;
+ * сохраняется с настройками голоса (sv=ID:pct, выключенный — sv=ID:pct:m) */
+void voice_stream_volume_set(u64 user, float vol);
+float voice_stream_volume(u64 user);
+void voice_stream_mute_set(u64 user, bool mute);
+bool voice_stream_muted(u64 user);
 void voice_vad_adjust(int delta_db);
 int voice_vad_db(void);
 void voice_ptt(bool down);
