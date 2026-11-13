@@ -4192,6 +4192,7 @@ int guild_rail(RailEnt **out) {
 static GuildFolder *FDC;                        /* подтверждённый Discord порядок (есть, пока запись не завершена) */
 static int nfdc;
 static bool fdc_on, gf_fly, gf_again, gf_hold;  /* gf_hold — selftest: «отправлено», ответ подаёт проверка */
+static bool gf_edit;                            /* в записи есть правка папки (название, цвет, роспуск): своё сообщение об отказе */
 static GuildFolder *FDS;                        /* отправленный порядок (ждёт ответа) */
 static int nfds;
 static GuildFolder *fd_dup(const GuildFolder *a, int n) {
@@ -4256,13 +4257,15 @@ static void on_gf_done(Resp *r, void *ctx) {
             if (s) folders_proto(s, strlen(s), true);
             json_done();
         }
+        gf_edit = false;
         ui_dirty();
         return;
     }
     gf_again = false;
     fd_free_arr(FDS, nfds); FDS = NULL; nfds = 0;
     fdc_restore();
-    resp_fail(r, ui_tr("порядок серверов не сохранён"));
+    resp_fail(r, gf_edit ? ui_tr("изменения папок серверов не сохранены") : ui_tr("порядок серверов не сохранён"));
+    gf_edit = false;
     ui_dirty();
 }
 static void gf_send(void) {
@@ -4364,6 +4367,141 @@ bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, 
     gf_send();
     return true;
 }
+
+/* ---- №2 настройки папки: название и цвет, роспуск ----
+ * Название — поле 3 (google.protobuf.StringValue), цвет — поле 4 (google.protobuf.UInt64Value) сообщения папки.
+ * Меняется только своё поле в meta, остальные (id, неизвестные) остаются байт в байт и на своих местах.
+ * Запись — та же, что у перестановки (PATCH settings-proto/1 только с полем 14), откат при отказе — тот же. */
+static void meta_put(GuildFolder *f, int field, const Buf *val) {   /* val — готовое поле целиком; NULL — убрать */
+    Buf m = {0};
+    bool put = false;
+    size_t i = 0, n = (size_t)f->nmeta;
+    while (i < n) {
+        u64 key;
+        size_t k0 = i;
+        if (!pb_varint(f->meta, n, &i, &key) || !pb_skip(f->meta, n, &i, (int)(key & 7))) { buf_put(&m, f->meta + k0, n - k0); break; }
+        int fn = (int)(key >> 3);
+        if (fn == field) {                      /* прежнее значение: новое — на его место */
+            if (val && !put) buf_put(&m, val->p, val->len);
+            put = true;
+            continue;
+        }
+        if (!put && val && fn > field && fn <= 4) { buf_put(&m, val->p, val->len); put = true; }   /* порядок полей, как у Discord */
+        buf_put(&m, f->meta + k0, i - k0);
+    }
+    if (!put && val) buf_put(&m, val->p, val->len);
+    free(f->meta);
+    f->meta = m.len ? xmalloc(m.len) : NULL;
+    if (m.len) memcpy(f->meta, m.p, m.len);
+    f->nmeta = (int)m.len;
+    buf_free(&m);
+}
+/* Название из ввода: края без пробелов, управляющие символы — пробел. false — длиннее предела или не UTF-8. */
+static bool folder_name_clean(const char *s, char *out, size_t on, char *err, size_t errn) {
+    size_t o = 0;
+    int cps = 0;
+    while (*s == ' ' || *s == '\t') s++;
+    for (const unsigned char *p = (const unsigned char *)s; *p; ) {
+        int k = *p < 0x80 ? 1 : (*p & 0xE0) == 0xC0 ? 2 : (*p & 0xF0) == 0xE0 ? 3 : (*p & 0xF8) == 0xF0 ? 4 : 0;
+        for (int j = 1; j < k; j++) if ((p[j] & 0xC0) != 0x80) k = 0;
+        if (!k) { if (err) snprintf(err, errn, "%s", ui_tr("название папки: неверный текст")); return false; }
+        if (++cps > FOLDER_NAME_MAX || o + (size_t)k >= on) { if (err) snprintf(err, errn, ui_tr("название папки длиннее %d символов"), FOLDER_NAME_MAX); return false; }
+        if (k == 1 && (*p < 0x20 || *p == 0x7F)) out[o++] = ' ';
+        else { memcpy(out + o, p, (size_t)k); o += (size_t)k; }
+        p += k;
+    }
+    while (o && out[o - 1] == ' ') o--;
+    out[o] = 0;
+    return true;
+}
+/* Общее для правок папки: проверка, снимок подтверждённого порядка, правка, сравнение, отправка. */
+static int fd_edit_k;
+static bool fd_edit_run(u64 gid, void (*fn)(void *), void *arg, char *err, size_t errn) {
+    if (err && errn) *err = 0;
+    if (!fd_known || fd_lossy) { if (err) snprintf(err, errn, "%s", ui_tr("порядок серверов ещё не получен от Discord")); return false; }
+    int k = fd_find(gid, NULL);
+    if (k < 0 || !fd_real(&FD[k])) return false;
+    bool first = !fdc_on;
+    if (first) { FDC = fd_dup(FD, nfd); nfdc = nfd; fdc_on = true; }
+    Buf before = {0}, after = {0};
+    fd_encode(&before);
+    fd_edit_k = k;
+    fn(arg);
+    fd_encode(&after);
+    bool same = before.len == after.len && (!before.len || !memcmp(before.p, after.p, before.len));
+    buf_free(&before);
+    buf_free(&after);
+    if (same) { if (first) fdc_restore(); return false; }
+    gf_edit = true;
+    ui_dirty();
+    gf_send();
+    return true;
+}
+typedef struct { const char *name; i64 color; } FolderEdit;
+static void fe_apply(void *a) {
+    const FolderEdit *e = a;
+    GuildFolder *f = &FD[fd_edit_k];
+    if (e->name) {
+        Buf w = {0}, v = {0};
+        if (*e->name) { pbw_len(&w, 1, e->name, strlen(e->name)); pbw_len(&v, 3, w.p, w.len); }
+        meta_put(f, 3, *e->name ? &v : NULL);
+        buf_free(&w); buf_free(&v);
+        free(f->name);
+        f->name = NULL;
+        if (*e->name) { char *t = san(e->name, false); if (strlen(t) > 64) { size_t q = 64; while (q && ((unsigned char)t[q] & 0xC0) == 0x80) q--; t[q] = 0; } f->name = t; }
+    }
+    if (e->color == FOLDER_COLOR_DEFAULT) { meta_put(f, 4, NULL); f->color = 0; f->has_color = false; }
+    else if (e->color >= 0) {
+        Buf v = {0};
+        pbw_wrapped_u(&v, 4, (u64)e->color & 0xFFFFFFu);
+        meta_put(f, 4, &v);
+        buf_free(&v);
+        f->color = (u32)e->color & 0xFFFFFFu; f->has_color = true;
+    }
+}
+bool guild_folder_edit(u64 gid, const char *name, i64 color, char *err, size_t errn) {
+    char nm[FOLDER_NAME_MAX * 4 + 1];
+    if (err && errn) *err = 0;
+    if (name && !folder_name_clean(name, nm, sizeof nm, err, errn)) return false;
+    if (color < FOLDER_COLOR_DEFAULT || color > 0xFFFFFF) return false;
+    FolderEdit e = { name ? nm : NULL, color };
+    return fd_edit_run(gid, fe_apply, &e, err, errn);
+}
+static void fu_apply(void *a) {                  /* папка -> её серверы одиночными записями на том же месте, по порядку */
+    (void)a;
+    GuildFolder e = fd_take(fd_edit_k);
+    for (int q = 0; q < e.n; q++) fd_insert(fd_edit_k + q, fd_single(e.gids[q]));
+    fd_entry_free(&e);
+}
+bool guild_folder_ungroup(u64 gid, char *err, size_t errn) { return fd_edit_run(gid, fu_apply, NULL, err, errn); }
+void guild_folder_name(u64 gid, char *out, size_t n) {   /* название целиком (для правки), без управляющих символов */
+    if (!n) return;
+    out[0] = 0;
+    int k = fd_find(gid, NULL);
+    if (k < 0) return;
+    const GuildFolder *f = &FD[k];
+    size_t i = 0, m = (size_t)f->nmeta;
+    while (i < m) {
+        u64 key, l;
+        if (!pb_varint(f->meta, m, &i, &key)) return;
+        if ((key >> 3) == 3 && (key & 7) == 2) {
+            const u8 *s = NULL;
+            size_t sl = 0;
+            if (!pb_varint(f->meta, m, &i, &l) || l > m - i) return;
+            if (pb_wrapped(f->meta + i, (size_t)l, NULL, &s, &sl) && sl && sl < 1024) {
+                char *t = xmalloc(sl + 1);
+                memcpy(t, s, sl); t[sl] = 0;
+                char *c = san(t, false);
+                size_t cl = strlen(c);
+                if (cl >= n) { cl = n - 1; while (cl && ((unsigned char)c[cl] & 0xC0) == 0x80) cl--; }
+                memcpy(out, c, cl); out[cl] = 0;
+                free(c); free(t);
+            }
+            return;
+        }
+        if (!pb_skip(f->meta, m, &i, (int)(key & 7))) return;
+    }
+}
 /* selftest: сохранить порядок и вернуть его после проверки (проверки не сбивают демо-полосу) */
 static struct { GuildFolder *fd; int n; u8 *ex; size_t nex; bool known, lossy, on; } FDT;
 void folders_test_push(void);
@@ -4378,7 +4516,7 @@ void folders_test_pop(void) {
     if (!FDT.on) return;
     fdc_drop();
     fd_free_arr(FDS, nfds); FDS = NULL; nfds = 0;
-    gf_fly = gf_again = gf_hold = false;
+    gf_fly = gf_again = gf_hold = gf_edit = false;
     folders_free();
     FD = FDT.fd; nfd = FDT.n; fd_extra = FDT.ex; fd_nextra = FDT.nex; fd_known = FDT.known; fd_lossy = FDT.lossy;
     memset(&FDT, 0, sizeof FDT);

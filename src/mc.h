@@ -447,6 +447,15 @@ int guild_rail(RailEnt **out);                             /* *out — в куч
 enum { GM_BEFORE, GM_AFTER, GM_INTO };
 bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, size_t errn);
 void guild_folders_pb(Buf *out);                           /* protobuf PreloadedUserSettings только с полем 14 */
+/* Настройки папки, где сервер gid (только настоящая папка: с id или из нескольких серверов). name: NULL — не менять,
+ * "" — убрать название (не длиннее FOLDER_NAME_MAX символов, края без пробелов). color: 0..0xFFFFFF,
+ * FOLDER_COLOR_KEEP — не менять, FOLDER_COLOR_DEFAULT — убрать (цвет по умолчанию). Запись и откат — как у guild_move. */
+#define FOLDER_NAME_MAX 100
+#define FOLDER_COLOR_KEEP (-1)
+#define FOLDER_COLOR_DEFAULT (-2)
+bool guild_folder_edit(u64 gid, const char *name, i64 color, char *err, size_t errn);
+bool guild_folder_ungroup(u64 gid, char *err, size_t errn);   /* распустить: серверы остаются на месте по порядку */
+void guild_folder_name(u64 gid, char *out, size_t n);         /* название папки целиком (GuildFolder.name — до 64 байт) */
 bool guild_order_busy(void);                               /* запись порядка ещё не подтверждена */
 /* №119 слова-тревоги: только в памяти; сообщение со словом — как упоминание (подсветка и счётчик) */
 void alert_words_set(const char *words);                   /* через запятую, до 16 слов по 32 байта; "" — выключить */

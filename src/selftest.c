@@ -647,10 +647,20 @@ static void rail_str(char *out, size_t n) {
     }
     free(re);
 }
-/* ожидаемая полоса: head + одиночные демо-серверы 2200..2208, которые уже пришли */
+/* ожидаемая полоса: head + хвост демо из серверов 2200..2208 (одиночный 2200 и три папки), только пришедшие */
 static void rail_want(char *out, size_t n, const char *head) {
+    static const u64 TAIL[][5] = { { 2200 }, { 2201 }, { 2202, 2205, 2203 }, { 2204, 2206, 2207, 2208 } };
     snprintf(out, n, "%s", head);
-    for (u64 g = 2200; g <= 2208; g++) if (guild_find(g)) { size_t o = strlen(out); snprintf(out + o, n - o, " %llu", (unsigned long long)g); }
+    for (int t = 0; t < 4; t++) {
+        int k = 0, m = 0;
+        u64 got[5];
+        for (int q = 0; q < 5 && TAIL[t][q]; q++) if (guild_find(TAIL[t][q])) got[m++] = TAIL[t][q];
+        for (int q = 0; q < m; q++) {
+            size_t o = strlen(out);
+            snprintf(out + o, n - o, " %s%llu%s", t && !k ? "[" : "", (unsigned long long)got[q], t && q == m - 1 ? "]" : "");
+            k++;
+        }
+    }
 }
 static bool rail_is(const char *head) {
     char a[512], b[512];
@@ -758,10 +768,16 @@ static void t_guild_order(void) {
     bool k1 = rail_is("[2600 2700] 2000 [2100 2500]");
     { Key k = { .code = K_UP, .alt = true }; ui_feed_key(&k); }
     bool k2 = rail_is("2000 [2600 2700] [2100 2500]");
-    key(K_DOWN, 0);                              /* Up/Down — по порядку полосы: следующий — первый сервер папки */
+    key(K_DOWN, 0);                              /* Up/Down — по видимой полосе: следующая — плитка папки, сервер тот же */
     cur_take();
-    bool k3 = on_screen("Работа v");
-    check(k1 && k2 && k3, "№2 Alt+Down / Alt+Up в колонке серверов переставляют сервер; Down — по порядку полосы");
+    bool k3 = on_screen("Уютный уголок v");
+    key(K_ENTER, 0);                             /* Enter на папке — раскрыть, Down — её первый сервер */
+    key(K_DOWN, 0);
+    cur_take();
+    k3 = k3 && on_screen("Работа v");
+    key(K_UP, 0);                                /* обратно на папку и свернуть */
+    key(K_ENTER, 0);
+    check(k1 && k2 && k3, "№2 Alt+Down / Alt+Up в колонке серверов переставляют сервер; Down — по видимой полосе, Enter раскрывает папку");
     key(K_HOME, 0);
     folders_test_pop();
 
@@ -825,6 +841,350 @@ static void t_guild_order(void) {
     hover_off();
     ui_notice_clear();
     key(K_HOME, 0);
+    key(K_DOWN, 0);
+    key(K_TAB, 0);
+    key(K_ENTER, 0);
+}
+
+/* №2 папки серверов: плитка 2x2 мини-значков, раскрытие щелчком и Enter, меню папки (название, цвет, роспуск),
+ * их protobuf (только поле 14, остальное цело), откат при отказе, перетаскивание и «второй вход» после правок. */
+bool ui_fold_tile(int fk, int K, ImgCell *out, u32 *bg);
+bool ui_fold_open(int fk);
+/* Плитка папки на экране (обычные клетки): значки 2x1 по углам 6x3 с клетки (1, y); занято ли место q. */
+static bool slot_used(const Scr *s, int y, int q) {
+    u32 gap = scr_cell(s, 3, y)->bg;             /* середина верхней строки — всегда фон папки */
+    int x = 1 + (q & 1) * 4, yy = y + (q >> 1) * 2;
+    return scr_cell(s, x, yy)->bg != gap || scr_cell(s, x + 1, yy)->bg != gap;
+}
+static int tile_slots(const Scr *s, int y) {     /* сколько мест занято; -1 — места заняты не подряд или середина не фон */
+    int n = 0;
+    for (int q = 0; q < 4; q++) { if (slot_used(s, y, q)) { if (n != q) return -1; n++; } }
+    u32 gap = scr_cell(s, 3, y)->bg;
+    for (int x = 1; x <= 6; x++) if (scr_cell(s, x, y + 1)->bg != gap) return -1;
+    return n;
+}
+/* глиф 3x4 мини-букв в плитке 24x12 с клетки (x, y): белые клетки — ровно биты строк g (4 — слева) */
+static bool wpx(const ImgCell *t, int x, int y, const char *g) {
+    for (int r = 0; r < 4; r++) for (int b = 0; b < 3; b++) {
+        const ImgCell *c = &t[(y + r) * 24 + x + b];
+        bool w = c->bg[0] > 0xe0 && c->bg[1] > 0xe0 && c->bg[2] > 0xe0;   /* C_WHITE */
+        if (w != (((g[r] - '0') >> (2 - b) & 1) != 0)) return false;
+    }
+    return true;
+}
+static int fold_k(u64 g) {                       /* номер папки, где сервер g */
+    const GuildFolder *f;
+    int n = guild_folders(&f);
+    for (int k = 0; k < n; k++) for (int q = 0; q < f[k].n; q++) if (f[k].gids[q] == g) return k;
+    return -1;
+}
+/* protobuf папок, как пришёл бы от Discord: записи по порядку, в «Играх» — неизвестное поле 9 между названием
+ * и цветом; в GuildFolders — неизвестное поле 5 и guild_positions демо (их ждёт pb_roundtrip) */
+static void pbt_v(Buf *b, u64 v) { do { u8 c = (u8)(v & 0x7F); v >>= 7; if (v) c |= 0x80; buf_put(b, &c, 1); } while (v); }
+static void pbt_l(Buf *b, int f, const void *p, size_t n) { pbt_v(b, (u64)f << 3 | 2); pbt_v(b, n); buf_put(b, p, n); }
+static void pbt_folder(Buf *gf, const u64 *g, int n, u64 id, const char *name, bool unk, long color) {
+    Buf f = {0}, w = {0}, w2 = {0};
+    u8 le[8];
+    Buf ids = {0};
+    for (int q = 0; q < n; q++) { for (int b = 0; b < 8; b++) le[b] = (u8)(g[q] >> (8 * b)); buf_put(&ids, le, 8); }
+    pbt_l(&f, 1, ids.p, ids.len);
+    if (id) { pbt_v(&w, 1 << 3); pbt_v(&w, id); pbt_l(&f, 2, w.p, w.len); }
+    if (name) { pbt_l(&w2, 1, name, strlen(name)); pbt_l(&f, 3, w2.p, w2.len); }
+    if (unk) { pbt_v(&f, 9 << 3); pbt_v(&f, 77); }
+    if (color >= 0) { Buf c = {0}; pbt_v(&c, 1 << 3); pbt_v(&c, (u64)color); pbt_l(&f, 4, c.p, c.len); buf_free(&c); }
+    pbt_l(gf, 1, f.p, f.len);
+    buf_free(&f); buf_free(&w); buf_free(&w2); buf_free(&ids);
+}
+static void fold_test_ready(void) {              /* READY с папками демо + неизвестные поля */
+    static const u64 A[] = { 2600, 2700 }, B[] = { 2100, 2500 }, C[] = { 2200 }, D[] = { 2201 }, E[] = { 2202, 2205, 2203 }, F[] = { 2204, 2206, 2207, 2208 };
+    static const u64 POS[] = { 2000, 2100, 2500, 2600, 2700 };
+    Buf gf = {0}, pb = {0}, b64 = {0}, pos = {0};
+    pbt_folder(&gf, A, 2, 2, NULL, false, -1);
+    pbt_folder(&gf, B, 2, 1, "Игры", true, 0x3BA55C);
+    pbt_folder(&gf, C, 1, 0, NULL, false, -1);
+    pbt_folder(&gf, D, 1, 3, NULL, false, 0xE67E22);
+    pbt_folder(&gf, E, 3, 4, "Тройка", false, 0x9B59B6);
+    pbt_folder(&gf, F, 4, 5, "Четвёрка", false, -1);
+    pbt_v(&gf, 5 << 3); pbt_v(&gf, 1);           /* неизвестное поле GuildFolders */
+    for (int i = 0; i < 5; i++) { u8 le[8]; for (int b = 0; b < 8; b++) le[b] = (u8)(POS[i] >> (8 * b)); buf_put(&pos, le, 8); }
+    pbt_l(&gf, 2, pos.p, pos.len);
+    pbt_v(&pb, 3 << 3); pbt_v(&pb, 5);
+    pbt_l(&pb, 14, gf.p, gf.len);
+    base64_enc(pb.p, pb.len, &b64);
+    buf_put(&b64, "", 1);
+    folders_test_proto(b64.p);
+    buf_free(&gf); buf_free(&pb); buf_free(&b64); buf_free(&pos);
+}
+/* поле 14 записи целиком (байты) — для сравнения записей папок до и после */
+static void pb_now(Buf *out) { buf_free(out); memset(out, 0, sizeof *out); guild_folders_pb(out); }
+static bool pb_has(const Buf *b, const void *p, size_t n) {
+    for (size_t i = 0; i + n <= b->len; i++) if (!memcmp(b->p + i, p, n)) return true;
+    return false;
+}
+/* запись папки fk (сообщение Folder) в текущем protobuf — байты; для сравнения «остальные папки целы» */
+static void folder_rec(int fk, Buf *out) {
+    Buf pb = {0};
+    guild_folders_pb(&pb);
+    memset(out, 0, sizeof *out);
+    size_t i = 1;                                /* после ключа поля 14 — его длина (varint), затем записи */
+    u64 k;
+    int sh;
+    while (i < pb.len && (pb.p[i] & 0x80)) i++;
+    i++;
+    int at = 0;
+    while (i < pb.len) {
+        size_t k0 = i;
+        k = pb.p[i++];
+        u64 ln = 0; sh = 0;
+        while (i < pb.len && (pb.p[i] & 0x80)) { ln |= (u64)(pb.p[i] & 0x7F) << sh; sh += 7; i++; }
+        if (i < pb.len) ln |= (u64)(pb.p[i] & 0x7F) << sh;
+        i++;
+        if (k == 0x0A && at++ == fk) { buf_put(out, pb.p + k0, i - k0 + ln); break; }
+        i += ln;
+    }
+    buf_free(&pb);
+}
+static bool recs_same(Buf *a, int n, int skip) { /* записи папок 0..n-1, кроме skip, те же, что в a[] */
+    bool ok = true;
+    for (int k = 0; k < n; k++) {
+        if (k == skip) continue;
+        Buf r;
+        folder_rec(k, &r);
+        if (r.len != a[k].len || memcmp(r.p, a[k].p, r.len)) ok = false;
+        buf_free(&r);
+    }
+    return ok;
+}
+static void t_folders(void) {
+    char err[200];
+    Scr s;
+    ImgCell tile[6 * 4 * 3 * 4];
+    u32 bg;
+    /* 1. плитки свёрнутых папок на полосе 120x40: 2000 (y 6), [2600 2700] (10), «Игры» (14), 2200 (18), [2201] (22),
+     *    «Тройка» (26), «Четвёрка» (30) — мини-значки 2, 2, 1, 3, 4; пустые места — фон цвета папки */
+    CW = 120; CH = 40;
+    hover_off();
+    scr_take(&s, CW, CH);
+    int n1 = tile_slots(&s, 22), n2 = tile_slots(&s, 10), n2b = tile_slots(&s, 14), n3 = tile_slots(&s, 26), n4 = tile_slots(&s, 30);
+    const char *l10 = scr_line(&s, 10);
+    bool ini = strstr(l10, "Ра") && strstr(l10, "Ку");   /* без значков — буквы, как на обычной плитке */
+    bool col = scr_cell(&s, 3, 22)->bg != scr_cell(&s, 3, 26)->bg;   /* цвет папки — фон плитки */
+    bool okg = n1 == 1 && n2 == 2 && n2b == 2 && n3 == 3 && n4 == 4 && ini && col && scr_grid_ok(&s, "папки 2x2") && scr_deco_ok(&s, "папки 2x2");
+    if (!okg) { say("    мест: 1:%d 2:%d 2:%d 3:%d 4:%d буквы %d цвет %d\n", n1, n2, n2b, n3, n4, ini, col); scr_print(&s); }
+    scr_free(&s);
+    check(okg, "№2 плитка свёрнутой папки: 2x2 мини-значка для 1, 2, 3, 4 серверов, пустые места — фон цвета папки, без значка — буквы");
+    /* 5 и больше серверов — только первые 4 */
+    folders_test_push();
+    bool m5 = guild_move(2200, false, GM_INTO, 2204, false, err, sizeof err);   /* «Четвёрка» + Котики = 5, плитка на y 26 */
+    scr_take(&s, CW, CH);
+    int n5 = tile_slots(&s, 26);
+    const char *l28 = scr_line(&s, 28);
+    m5 = m5 && n5 == 4 && strstr(scr_line(&s, 26), "Ку") && strstr(l28, "Го") && strstr(l28, "Не");
+    if (!m5) { say("    5 серверов: мест %d\n", n5); scr_print(&s); }
+    scr_free(&s);
+    folders_test_pop();
+    check(m5, "№2 папка из 5 серверов: на плитке первые 4");
+    /* мелкая сетка K=4 (окно): 24x12, значки 8x4 с полями 2/1 и промежутком 4/2; пятый не рисуется */
+    {
+        int fk = fold_k(2202);                    /* «Тройка»: значок, буквы «Ст» -> St, значок; четвёртое место пусто */
+        bool r = ui_fold_tile(fk, 4, tile, &bg);
+        u32 c3 = 0, cs = 0;
+        int x3 = 2 + 12, y3 = 1 + 6;
+        for (int yy = 0; yy < 4; yy++) for (int xx = 0; xx < 8; xx++) {
+            const ImgCell *c = &tile[(y3 + yy) * 24 + x3 + xx];
+            if (((u32)c->bg[0] << 16 | (u32)c->bg[1] << 8 | c->bg[2]) == bg && c->ch == ' ') c3++;
+        }
+        /* место 1 («Стратеги»): буквы «Ст» шрифтом 3x4 с клетки (15, 1): С — 7 4 4 7, т — 7 2 2 2 */
+        if (wpx(tile, 15, 1, "7447") && wpx(tile, 19, 1, "7222")) cs = 1;
+        for (int i = 0; i < 24; i++) if (((u32)tile[i].bg[0] << 16 | (u32)tile[i].bg[1] << 8 | tile[i].bg[2]) != bg) r = false;   /* верхнее поле — фон */
+        int fk4 = fold_k(2204);
+        folders_test_push();
+        guild_move(2200, false, GM_INTO, 2204, false, err, sizeof err);
+        fk4 = fold_k(2204);
+        ImgCell t5[24 * 12];
+        u32 bg5;
+        bool r5 = ui_fold_tile(fk4, 4, t5, &bg5);
+        bool four = r5;                          /* место 3 — «Небо» (Ne), не Котики */
+        four = four && wpx(t5, 15, 7, "5755") && wpx(t5, 19, 7, "7647");   /* «Не» */
+        folders_test_pop();
+        check(r && c3 == 32 && cs && four, "№2 плитка папки мелкой сеткой K=4: 2x2 значка 8x4, буквы шрифтом 3x4, пустое место — фон, из 5 серверов — первые 4");
+    }
+    {   /* уменьшение готовых клеток: ровный цвет остаётся тем же, размер — любой меньше */
+        ImgCell src[24 * 12], dst[8 * 4];
+        for (int i = 0; i < 24 * 12; i++) { src[i].ch = ' '; src[i].bg[0] = 200; src[i].bg[1] = 40; src[i].bg[2] = 10; memcpy(src[i].fg, src[i].bg, 3); }
+        img_shrink(src, 24, 12, 8, 4, dst);
+        bool ok = true;
+        for (int i = 0; i < 32; i++) {
+            int r = dst[i].bg[0] + (dst[i].fg[0] - dst[i].bg[0]) / 2;   /* среднее символа и фона — около исходного */
+            if (r < 170 || r > 230 || dst[i].ch < 0x20) ok = false;
+        }
+        check(ok, "№2 img_shrink: уменьшение готовых клеток сохраняет цвет (мини-значок без новой загрузки)");
+    }
+
+    /* 2. щелчок по папке раскрывает и сворачивает, выбранный сервер тот же; щелчок по серверу списка — переход */
+    folders_test_push();
+    int fa = fold_k(2600);
+    cur_take();
+    bool sel0 = on_screen("Уютный уголок v");
+    cur_take(); mouse_at(1, 3, 11); mouse_at(7, 3, 11);
+    bool op = ui_fold_open(fa) && on_screen("Уютный уголок v");
+    cur_take(); mouse_at(1, 3, 11); mouse_at(7, 3, 11);
+    bool cl = !ui_fold_open(fa) && on_screen("Уютный уголок v");
+    check(sel0 && op && cl, "№2 щелчок по папке раскрывает и сворачивает список её серверов, выбранный сервер не меняется");
+    cur_take(); mouse_at(1, 3, 11); mouse_at(7, 3, 11);      /* раскрыть: 2600 (y 14), 2700 (y 18) */
+    cur_take(); mouse_at(1, 3, 19); mouse_at(7, 3, 19);
+    bool go = on_screen("Курсы v") && ui_fold_open(fa);
+    key(K_ESC, 0);                               /* к серверам: Left на сервере раскрытой папки — свернуть, курсор на неё */
+    key(K_LEFT, 0);
+    bool kl = !ui_fold_open(fa) && on_screen("Курсы v");
+    key(K_ENTER, 0);                             /* Enter на папке — раскрыть */
+    bool ke = ui_fold_open(fa);
+    key(K_ENTER, 0);
+    ke = ke && !ui_fold_open(fa);
+    if (!(go && kl && ke)) say("    переход %d Left %d Enter %d\n", go, kl, ke);
+    check(go && kl && ke, "№2 щелчок по серверу раскрытой папки — переход; клавиатура: Left сворачивает, Enter раскрывает и сворачивает");
+    cur_take(); mouse_at(1, 3, 7); mouse_at(7, 3, 7);        /* обратно «Уютный уголок» */
+    folders_test_pop();
+
+    /* 3. название, цвет, роспуск: protobuf только с полем 14, другие папки и неизвестные поля целы, обратный разбор */
+    folders_test_push();
+    fold_test_ready();
+    int fg = fold_k(2100);
+    Buf rec[8], pb = {0};
+    for (int k = 0; k < 6; k++) folder_rec(k, &rec[k]);
+    bool unk0 = pb_roundtrip();
+    pb_now(&pb);
+    bool unk = unk0 && pb_has(&pb, "\x48\x4d", 2) && pb_has(&pb, "\x28\x01", 2);
+    bool e1 = guild_folder_edit(2100, "  Новые игры ", FOLDER_COLOR_KEEP, err, sizeof err);
+    const GuildFolder *f = folder_of(2100);
+    e1 = e1 && f && f->name && !strcmp(f->name, "Новые игры") && f->color == 0x3BA55C && f->id == 1 && pb_roundtrip() && recs_same(rec, 6, fg);
+    pb_now(&pb);
+    e1 = e1 && pb_has(&pb, "\x48\x4d", 2) && pb_has(&pb, "\x28\x01", 2) && pb_has(&pb, "Новые игры", strlen("Новые игры")) && !pb_has(&pb, "Игры", strlen("Игры"));
+    {   /* порядок полей папки: id, название, неизвестное 9, цвет — как пришли */
+        Buf r; folder_rec(fg, &r);
+        const char *nm = "Новые игры";
+        size_t pn = 0, pu = 0, pc = 0;
+        for (size_t i = 0; i + 2 <= r.len; i++) {
+            if (!pn && i + strlen(nm) <= r.len && !memcmp(r.p + i, nm, strlen(nm))) pn = i;
+            if (!pu && r.p[i] == 0x48 && (u8)r.p[i + 1] == 0x4d) pu = i;
+            if (r.p[i] == 0x22 && i > pu && pu) { pc = i; break; }
+        }
+        e1 = e1 && pn && pu > pn && pc > pu;
+        buf_free(&r);
+    }
+    check(unk && e1, "№2 название папки: края без пробелов, protobuf только поле 14, остальные папки и неизвестные поля байт в байт, обратный разбор совпадает");
+    bool same = !guild_folder_edit(2100, "Новые игры", FOLDER_COLOR_KEEP, err, sizeof err) && !err[0] && !guild_order_busy();
+    bool e2 = guild_folder_edit(2100, NULL, 0x3498db, err, sizeof err) && (f = folder_of(2100)) && f->has_color && f->color == 0x3498db && f->name && !strcmp(f->name, "Новые игры") && pb_roundtrip() && recs_same(rec, 6, fg);
+    bool e3 = guild_folder_edit(2100, NULL, FOLDER_COLOR_DEFAULT, err, sizeof err) && (f = folder_of(2100)) && !f->has_color && pb_roundtrip();
+    pb_now(&pb);
+    e3 = e3 && pb_has(&pb, "\x48\x4d", 2);
+    {   Buf r; folder_rec(fg, &r); e3 = e3 && !pb_has(&r, "\x22\x05\x08", 3) && !pb_has(&r, "\x22\x04\x08", 3); buf_free(&r); }
+    check(same && e2 && e3, "№2 цвет папки: из палитры и «по умолчанию» (поле 4 убрано), то же название — без записи");
+    bool n0 = guild_folder_edit(2100, "   ", FOLDER_COLOR_KEEP, err, sizeof err) && (f = folder_of(2100)) && !f->name && pb_roundtrip();
+    { Buf r; folder_rec(fg, &r); n0 = n0 && !pb_has(&r, "Новые", 10) && pb_has(&r, "\x48\x4d", 2); buf_free(&r); }
+    char lng[512];
+    memset(lng, 'a', 101); lng[101] = 0;
+    bool n1l = !guild_folder_edit(2100, lng, FOLDER_COLOR_KEEP, err, sizeof err) && strstr(err, "100") && !folder_of(2100)->name;
+    lng[100] = 0;
+    bool n100 = guild_folder_edit(2100, lng, FOLDER_COLOR_KEEP, err, sizeof err) && strlen(folder_of(2100)->name) == 64 && pb_roundtrip();
+    char nml[100 * 2 + 4] = "";
+    for (int i = 0; i < 100; i++) strcat(nml, "я");
+    bool cy = guild_folder_edit(2100, nml, FOLDER_COLOR_KEEP, err, sizeof err);
+    char got[512];
+    guild_folder_name(2100, got, sizeof got);
+    cy = cy && !strcmp(got, nml);
+    strcat(nml, "я");
+    cy = cy && !guild_folder_edit(2100, nml, FOLDER_COLOR_KEEP, err, sizeof err) && err[0];
+    check(n0 && n1l && n100 && cy, "№2 название: пустое убирает поле 3; 100 символов (и кириллицей) можно, 101 — отказ с причиной; целиком для правки");
+    bool u1 = guild_folder_ungroup(2100, err, sizeof err) && rail_is("2000 [2600 2700] 2100 2500") && pb_roundtrip() && !folder_of(2100)->id;
+    {   /* остальные папки целы (номера сдвинулись: «Игры» стали двумя записями) */
+        Buf r;
+        bool o = true;
+        folder_rec(0, &r); o = o && r.len == rec[0].len && !memcmp(r.p, rec[0].p, r.len); buf_free(&r);
+        for (int k = 2; k < 6; k++) { folder_rec(k + 1, &r); o = o && r.len == rec[k].len && !memcmp(r.p, rec[k].p, r.len); buf_free(&r); }
+        u1 = u1 && o;
+    }
+    bool u2 = !guild_folder_ungroup(2100, err, sizeof err) && !guild_folder_edit(2100, "x", FOLDER_COLOR_KEEP, err, sizeof err) && !guild_folder_ungroup(2000, err, sizeof err);
+    check(u1 && u2, "№2 роспуск папки: серверы на месте по порядку, остальные папки байт в байт; одиночный сервер — не папка");
+    for (int k = 0; k < 6; k++) buf_free(&rec[k]);
+    folders_test_pop();
+
+    /* 4. отказ Discord — прежние название и цвет, причина на экране */
+    folders_test_push();
+    guild_order_test_hold(true);
+    bool w1 = guild_folder_edit(2100, "Новое", 0xe74c3c, err, sizeof err) && guild_order_busy() && !strcmp(folder_of(2100)->name, "Новое");
+    guild_order_test_reply(403, "{\"message\":\"Missing Access\",\"code\":50001}");
+    CW = 160;
+    f = folder_of(2100);
+    bool w2 = !guild_order_busy() && f->name && !strcmp(f->name, "Игры") && f->color == 0x3BA55C && on_screen("изменения папок серверов не сохранены");
+    CW = 120;
+    bool w3 = guild_folder_ungroup(2600, err, sizeof err) && rail_is("2000 2600 2700 [2100 2500]");
+    guild_order_test_reply(500, NULL);
+    w3 = w3 && rail_is("2000 [2600 2700] [2100 2500]");
+    guild_order_test_hold(false);
+    ui_notice_clear();
+    folders_test_pop();
+    check(w1 && w2 && w3, "№2 отказ Discord на название, цвет и роспуск — всё как было, причина на экране");
+
+    /* 5. меню по правой кнопке: Переименовать (окно с текущим названием), Цвет, Распустить; затем перетаскивание */
+    folders_test_push();
+    CW = 120; CH = 40;
+    hover_off();
+    cur_take(); mouse_at(3, 3, 15);                          /* правый щелчок по «Играм» */
+    bool mn = on_screen("Переименовать") && on_screen("Цвет...") && on_screen("Распустить папку");
+    key(K_ENTER, 0);                             /* Переименовать */
+    bool fm = on_screen("Переименовать папку") && on_screen("Игры");
+    for (int i = 0; i < 4; i++) key(K_BS, 0);
+    key(K_CHAR, 0x423); key(K_CHAR, 0x440); key(K_CHAR, 0x430);   /* «Ура» */
+    key(K_ENTER, 0);
+    f = folder_of(2100);
+    fm = fm && f->name && !strcmp(f->name, "Ура") && !on_screen("Переименовать папку");
+    cur_take(); mouse_at(3, 3, 15);
+    key(K_DOWN, 0); key(K_ENTER, 0);             /* Цвет... */
+    bool cm = on_screen("По умолчанию") && on_screen("Синий");
+    key(K_DOWN, 0); key(K_DOWN, 0); key(K_DOWN, 0); key(K_ENTER, 0);   /* Синий */
+    cm = cm && folder_of(2100)->color == 0x3498db;
+    cur_take(); mouse_at(1, 3, 7);                           /* после правок — перетаскивание: «Уютный уголок» в «Ура» */
+    mouse_at(6, 3, 12);
+    mouse_at(6, 3, 15);
+    mouse_at(7, 3, 15);
+    f = folder_of(2000);
+    bool dr = rail_is("[2600 2700] [2100 2500 2000]") && f && f->name && !strcmp(f->name, "Ура") && f->color == 0x3498db && pb_roundtrip();
+    cur_take(); mouse_at(3, 3, 11);                          /* «Ура» теперь вторая (y 10): распустить */
+    key(K_DOWN, 0); key(K_DOWN, 0); key(K_ENTER, 0);
+    bool um = rail_is("[2600 2700] 2100 2500 2000");
+    check(mn && fm && cm && dr && um, "№2 меню папки по правой кнопке: переименовать (окно с названием), цвет, распустить; перетаскивание после переименования");
+    if (!(mn && fm && cm && dr && um)) say("    меню %d окно %d цвет %d протяжка %d роспуск %d\n", mn, fm, cm, dr, um);
+    folders_test_pop();
+
+    /* 6. второй вход после правок: наш protobuf -> READY нового сеанса -> те же папки -> правки снова работают */
+    folders_test_push();
+    fold_test_ready();
+    bool s1 = guild_folder_edit(2100, "Вход", 0x2ecc71, err, sizeof err) && guild_folder_ungroup(2202, err, sizeof err);
+    for (int round = 0; round < 2 && s1; round++) {
+        Buf p8 = {0}, b8 = {0};
+        guild_folders_pb(&p8);
+        base64_enc(p8.p, p8.len, &b8);
+        buf_put(&b8, "", 1);
+        char before[512], after[512];
+        rail_str(before, sizeof before);
+        folders_test_proto(b8.p);
+        rail_str(after, sizeof after);
+        Buf p9 = {0};
+        guild_folders_pb(&p9);
+        f = folder_of(2100);
+        s1 = !strcmp(before, after) && p8.len == p9.len && !memcmp(p8.p, p9.p, p8.len) && f && f->name && f->color == 0x2ecc71 && pb_has(&p9, "\x48\x4d", 2);
+        buf_free(&p8); buf_free(&b8); buf_free(&p9);
+        if (round == 0) s1 = s1 && !strcmp(f->name, "Вход") && guild_folder_edit(2100, "Вход 2", FOLDER_COLOR_KEEP, err, sizeof err);
+        else s1 = s1 && !strcmp(f->name, "Вход 2") && guild_move(2000, false, GM_INTO, 2100, false, err, sizeof err) && fold_k(2000) == fold_k(2100) && pb_roundtrip();
+    }
+    check(s1, "№2 второй вход после правок папки: READY с нашим protobuf — те же название, цвет и неизвестные поля, правки снова уходят");
+    folders_test_pop();
+    buf_free(&pb);
+    CW = 120; CH = 34;
+    hover_off();
+    ui_notice_clear();
+    key(K_HOME, 0);                              /* как было: «Уютный уголок», #general, фокус в поле ввода */
     key(K_DOWN, 0);
     key(K_TAB, 0);
     key(K_ENTER, 0);
@@ -984,10 +1344,16 @@ static void t_keys(void) {
     check(vs.phase == VS_IDLE, "F2 / F3 / F7 без звонка ничего не делают");
     /* серверы: Home / End / Up / Down */
     key(K_TAB, 0);                               /* ввод -> серверы */
+    key(K_END, 0);                               /* последняя на полосе — папка «Четвёрка»: курсор на ней, сервер тот же */
+    scr_take(&s, W, H);
+    ok = scr_has(&s, "Уютный уголок v");
+    scr_free(&s);
+    key(K_ENTER, 0);                             /* раскрыть, End — её последний сервер «Небо» */
     key(K_END, 0);
     scr_take(&s, W, H);
-    ok = !scr_has(&s, "Уютный уголок v");
+    ok = ok && scr_has(&s, "Небо v");
     scr_free(&s);
+    key(K_LEFT, 0);                              /* Left с сервера раскрытой папки — свернуть её */
     key(K_HOME, 0);
     scr_take(&s, W, H);
     ok = ok && scr_has(&s, "Найти или начать беседу") && scr_has(&s, "Друзья");
@@ -996,7 +1362,7 @@ static void t_keys(void) {
     scr_take(&s, W, H);
     ok = ok && scr_has(&s, "Уютный уголок v");
     scr_free(&s);
-    check(ok, "серверы: End — последний, Home — личные сообщения, Down — «Уютный уголок»");
+    check(ok, "серверы: End — последняя папка (Enter раскрыл, End — её последний сервер), Home — личные сообщения, Down — «Уютный уголок»");
     /* каналы: Esc -> серверы, Right -> каналы */
     key(K_RIGHT, 0);
     key(K_ESC, 0);
@@ -4098,13 +4464,16 @@ int selftest(void) {
     ui_init();
     demo_load();
     ui_on_ready();
-    {   /* №2: демо-READY — две папки из user_settings_proto (с именем и цветом; без имени) */
+    {   /* №2: демо-READY — папки из user_settings_proto (с именем и цветом; без имени; из 1, 3 и 4 серверов) */
         const GuildFolder *gf;
         int nd = guild_folders(&gf);
-        bool f3 = nd == 11 && !gf[0].name && !gf[0].has_color && gf[0].n == 2 && gf[0].gids[0] == 2600 &&
+        bool f3 = nd == 6 && !gf[0].name && !gf[0].has_color && gf[0].n == 2 && gf[0].gids[0] == 2600 &&
                   gf[1].name && !strcmp(gf[1].name, "Игры") && gf[1].color == 0x3BA55C && gf[1].n == 2 && gf[1].gids[1] == 2500 &&
-                  !gf[2].id && gf[2].n == 1 && gf[2].gids[0] == 2200 && gf[10].gids[0] == 2208;
-        check(f3, "№2 демо: две папки и 9 одиночных серверов из user_settings_proto демо-READY");
+                  !gf[2].id && gf[2].n == 1 && gf[2].gids[0] == 2200 &&
+                  gf[3].id == 3 && !gf[3].name && gf[3].color == 0xE67E22 && gf[3].n == 1 &&
+                  gf[4].id == 4 && gf[4].name && !strcmp(gf[4].name, "Тройка") && gf[4].n == 3 && gf[4].gids[2] == 2203 &&
+                  gf[5].id == 5 && gf[5].name && !strcmp(gf[5].name, "Четвёрка") && !gf[5].has_color && gf[5].n == 4 && gf[5].gids[3] == 2208;
+        check(f3, "№2 демо: шесть записей user_settings_proto демо-READY (папки из 2, 2, 1, 3, 4 серверов и одиночный)");
     }
     key(K_DOWN, 0);                              /* «Уютный уголок» */
     key(K_TAB, 0);                               /* каналы */
@@ -4112,6 +4481,7 @@ int selftest(void) {
 
     term_puts("\n  данные и разбор:\n");     t_data();
     term_puts("\n  порядок серверов:\n");    t_guild_order();
+    term_puts("\n  папки серверов:\n");      t_folders();
     term_puts("\n  размеры экрана:\n");      t_sizes();
     term_puts("\n  фокус:\n");               t_focus();
     term_puts("\n  прокрутка:\n");           t_scroll();
