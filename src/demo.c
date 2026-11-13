@@ -140,7 +140,11 @@ static const char READY[] =
     "{\"id\":\"2700\",\"properties\":{\"name\":\"Курсы\",\"owner_id\":\"1006\"},\"roles\":[{\"id\":\"2700\",\"permissions\":\"3263553\"}],"
     "\"channels\":[{\"id\":\"3750\",\"type\":0,\"name\":\"лекции\",\"position\":0}]}],"
     /* папки — в protobuf, как у настоящего клиента (гоняет разбор user_settings_proto) */
-    "\"user_settings_proto\":\"GAVybQopChA0CAAAAAAAAMQJAAAAAAAAEgIIARoKCgjQmNCz0YDRiyIFCNzK7gEKFgoQKAoAAAAAAACMCgAAAAAAABICCAISKNAHAAAAAAAANAgAAAAAAADECQAAAAAAACgKAAAAAAAAjAoAAAAAAAA=\","
+    /* Порядок guild_folders нарочно не совпадает с порядком guilds выше: папка без имени (2600, 2700), затем
+     * «Игры» (2100, 2500); «Уютного уголка» (2000) в guild_folders нет — он сверху, как новый.
+     * Дальше одиночные 2200..2208 (приходят после READY). Полоса: 2000, [2600 2700], [Игры 2100 2500], 2200..2208
+     * (проверяет selftest). */
+    "\"user_settings_proto\":\"GAVy2QEKFgoQKAoAAAAAAACMCgAAAAAAABICCAIKKQoQNAgAAAAAAADECQAAAAAAABICCAEaCgoI0JjQs9GA0YsiBQjcyu4BCgoKCJgIAAAAAAAACgoKCJkIAAAAAAAACgoKCJoIAAAAAAAACgoKCJsIAAAAAAAACgoKCJwIAAAAAAAACgoKCJ0IAAAAAAAACgoKCJ4IAAAAAAAACgoKCJ8IAAAAAAAACgoKCKAIAAAAAAAAEijQBwAAAAAAADQIAAAAAAAAxAkAAAAAAAAoCgAAAAAAAIwKAAAAAAAA\","
     "\"merged_members\":[[{\"user_id\":\"1000\",\"roles\":[\"2004\"]},{\"user_id\":\"1004\",\"roles\":[\"2001\"]},"
     "{\"user_id\":\"1005\",\"roles\":[\"2003\"]},{\"user_id\":\"1006\",\"roles\":[\"2002\"]}],[{\"user_id\":\"1000\",\"roles\":[]}],"
     /* №128: в «Шахматном клубе» (2500) правила ещё не приняты — писать нельзя, есть «Принять правила» */

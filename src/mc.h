@@ -117,6 +117,7 @@ typedef struct {
     bool pending;                               /* №128: правила сервера ещё не приняты (писать нельзя) */
     i64 timeout_until;                          /* №127: мой тайм-аут (communication_disabled_until), unix-секунды; 0 — нет */
     char icon[35];                              /* хэш значка сервера: 32 hex или a_+32 hex, иначе "" */
+    i64 joined;                                 /* когда я вступил (joined_at, unix-секунды; 0 — неизвестно) */
 } Guild;
 
 typedef struct {                                /* кто в каком голосовом канале */
@@ -432,8 +433,21 @@ bool gdm_add(u64 cid, u64 uid, char *err, size_t errn);    /* добавить �
 bool gdm_remove(u64 cid, u64 uid, char *err, size_t errn); /* исключить (только владелец) */
 bool gdm_leave(u64 cid, char *err, size_t errn);           /* выйти из группы */
 /* №2 папки серверов (READY user_settings_proto, поле guild_folders; или старый user_settings.guild_folders) */
-typedef struct { i64 id; char *name; u32 color; bool has_color; int n; u64 *gids; } GuildFolder;
+typedef struct { i64 id; char *name; u32 color; bool has_color; int n; u64 *gids; u8 *meta; int nmeta; } GuildFolder;   /* meta — прочие поля папки как пришли */
 int guild_folders(const GuildFolder **out);                /* число папок (папка из одного сервера без id — просто сервер) */
+/* Полоса серверов в порядке Discord: сверху серверы без записи в guild_folders (новые: позже вступили — выше),
+ * дальше по guild_folders. Каждый сервер S.guilds ровно один раз. fk — индекс папки или RAIL_SINGLE / RAIL_NEW. */
+typedef struct { u64 gid; int fk; } RailEnt;
+enum { RAIL_SINGLE = -1, RAIL_NEW = -2 };
+int guild_rail(RailEnt **out);                             /* *out — в куче (free) */
+/* Перестановка: сразу на полосе, затем PATCH /users/@me/settings-proto/1 (только поле 14); отказ — откат и причина.
+ * src — сервер; whole — двигать его папку целиком. ref — сервер-ориентир; ref_top — относительно записи верхнего
+ * уровня, где ref (его папки целиком), иначе — внутри папки ref. GM_INTO — в конец папки ref; GM_NEWFOLDER —
+ * новая папка из ref и src. false — не изменилось (err — причина, если есть). */
+enum { GM_BEFORE, GM_AFTER, GM_INTO, GM_NEWFOLDER };
+bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, size_t errn);
+void guild_folders_pb(Buf *out);                           /* protobuf PreloadedUserSettings только с полем 14 */
+bool guild_order_busy(void);                               /* запись порядка ещё не подтверждена */
 /* №119 слова-тревоги: только в памяти; сообщение со словом — как упоминание (подсветка и счётчик) */
 void alert_words_set(const char *words);                   /* через запятую, до 16 слов по 32 байта; "" — выключить */
 const char *alert_words(void);

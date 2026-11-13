@@ -628,6 +628,178 @@ static void t_before_ready(void) {
     check(ok, "до READY: карточка «Astra DS / подключение... / Ctrl+Q - выход», сетка и ASCII");
 }
 
+/* №2 порядок полосы серверов: по guild_folders, устойчиво; перестановка и запись в Discord (protobuf). */
+void folders_test_proto(const char *b64);
+void folders_test_push(void);
+void folders_test_pop(void);
+void guild_order_test_hold(bool on);
+void guild_order_test_reply(long status, const char *body);
+static void ev(const char *t, const char *json);
+/* полоса строкой: одиночный — "gid", папка — "[gid gid]" */
+static void rail_str(char *out, size_t n) {
+    RailEnt *re;
+    int k = guild_rail(&re);
+    size_t o = 0;
+    out[0] = 0;
+    for (int i = 0; i < k && o + 32 < n; i++) {
+        bool open = re[i].fk >= 0 && (!i || re[i - 1].fk != re[i].fk), close = re[i].fk >= 0 && (i + 1 >= k || re[i + 1].fk != re[i].fk);
+        o += (size_t)snprintf(out + o, n - o, "%s%s%llu%s", i ? " " : "", open ? "[" : "", (unsigned long long)re[i].gid, close ? "]" : "");
+    }
+    free(re);
+}
+/* ожидаемая полоса: head + одиночные демо-серверы 2200..2208, которые уже пришли */
+static void rail_want(char *out, size_t n, const char *head) {
+    snprintf(out, n, "%s", head);
+    for (u64 g = 2200; g <= 2208; g++) if (guild_find(g)) { size_t o = strlen(out); snprintf(out + o, n - o, " %llu", (unsigned long long)g); }
+}
+static bool rail_is(const char *head) {
+    char a[512], b[512];
+    rail_str(a, sizeof a);
+    rail_want(b, sizeof b, head);
+    if (strcmp(a, b)) say("    полоса: %s\n    ожидали: %s\n", a, b);
+    return !strcmp(a, b);
+}
+/* protobuf записи: только поле 14; разобрать обратно — та же полоса и те же байты; guild_positions на месте */
+static bool pb_roundtrip(void) {
+    Buf pb = {0}, b64 = {0}, pb2 = {0};
+    guild_folders_pb(&pb);
+    char before[512], after[512];
+    rail_str(before, sizeof before);
+    size_t i = 1, l = 0;
+    int sh = 0;
+    while (i < pb.len && (pb.p[i] & 0x80)) { l |= (size_t)(pb.p[i] & 0x7F) << sh; sh += 7; i++; }
+    if (i < pb.len) l |= (size_t)(pb.p[i] & 0x7F) << sh;
+    bool only14 = pb.len > 2 && (u8)pb.p[0] == (14 << 3 | 2) && i + 1 + l == pb.len;
+    bool pos = pb.len > 42 && (u8)pb.p[pb.len - 42] == 0x12 && (u8)pb.p[pb.len - 41] == 0x28;   /* guild_positions демо — как пришли */
+    base64_enc(pb.p, pb.len, &b64);
+    buf_put(&b64, "", 1);
+    folders_test_proto(b64.p);
+    rail_str(after, sizeof after);
+    guild_folders_pb(&pb2);
+    bool same = pb.len == pb2.len && !memcmp(pb.p, pb2.p, pb.len);
+    buf_free(&pb); buf_free(&b64); buf_free(&pb2);
+    if (!(only14 && pos && same && !strcmp(before, after))) say("    protobuf: только поле 14 %d, guild_positions %d, байты %d, полоса %d\n", only14, pos, same, !strcmp(before, after));
+    return only14 && pos && same && !strcmp(before, after);
+}
+static const GuildFolder *folder_of(u64 g) {
+    const GuildFolder *f;
+    int n = guild_folders(&f);
+    for (int k = 0; k < n; k++) for (int q = 0; q < f[k].n; q++) if (f[k].gids[q] == g) return &f[k];
+    return NULL;
+}
+static void t_guild_order(void) {
+    char err[160];
+    /* 1. демо: guild_folders нарочно в другом порядке, чем guilds в READY; 2000 нет в guild_folders — сверху */
+    check(rail_is("2000 [2600 2700] [2100 2500]"), "№2 полоса = guild_folders (не порядок READY); сервер без записи — сверху");
+    /* 2. устойчивость: другой порядок прихода серверов — та же полоса */
+    {
+        char a[512], b[512];
+        rail_str(a, sizeof a);
+        for (int i = 0, j = S.nguilds - 1; i < j; i++, j--) { Guild t = S.guilds[i]; S.guilds[i] = S.guilds[j]; S.guilds[j] = t; }
+        rail_str(b, sizeof b);
+        for (int i = 0, j = S.nguilds - 1; i < j; i++, j--) { Guild t = S.guilds[i]; S.guilds[i] = S.guilds[j]; S.guilds[j] = t; }
+        check(!strcmp(a, b), "№2 полоса не зависит от порядка серверов в READY / GUILD_CREATE");
+    }
+    /* 3. новые серверы (поздний GUILD_CREATE, без записи в guild_folders) — сверху: позже вступили — выше, без даты — по id */
+    ev("GUILD_CREATE", "{\"id\":\"2950\",\"name\":\"Без даты\",\"roles\":[],\"channels\":[]}");
+    ev("GUILD_CREATE", "{\"id\":\"2800\",\"name\":\"Май\",\"joined_at\":\"2026-05-01T00:00:00.000000+00:00\",\"roles\":[],\"channels\":[]}");
+    ev("GUILD_CREATE", "{\"id\":\"2900\",\"name\":\"Июнь\",\"joined_at\":\"2026-06-01T00:00:00+00:00\",\"roles\":[],\"channels\":[]}");
+    check(rail_is("2900 2800 2950 2000 [2600 2700] [2100 2500]"), "№2 серверы без записи в guild_folders — сверху (новее — выше), порядок однозначен");
+    ev("GUILD_DELETE", "{\"id\":\"2950\"}");
+    ev("GUILD_DELETE", "{\"id\":\"2800\"}");
+    ev("GUILD_DELETE", "{\"id\":\"2900\"}");
+    /* 4. частичное обновление настроек без поля 14 папки не стирает */
+    ev("USER_SETTINGS_PROTO_UPDATE", "{\"settings\":{\"type\":1,\"proto\":\"GAU=\"},\"partial\":true}");
+    check(rail_is("2000 [2600 2700] [2100 2500]"), "№2 USER_SETTINGS_PROTO_UPDATE partial без guild_folders — папки на месте");
+
+    /* 5. перестановки (демо: только локально) и их protobuf */
+    folders_test_push();
+    bool m1 = guild_move(2500, false, GM_BEFORE, 2600, true, err, sizeof err) && rail_is("2000 2500 [2600 2700] [2100]") && pb_roundtrip();
+    const GuildFolder *gi = folder_of(2100);
+    m1 = m1 && gi && gi->id == 1 && gi->name && !strcmp(gi->name, "Игры") && gi->color == 0x3BA55C;
+    check(m1, "№2 перенос из папки наверх: полоса, protobuf только с полем 14, имя/цвет/id папки и guild_positions сохранены");
+    bool m2 = guild_move(2000, false, GM_INTO, 2600, false, err, sizeof err) && rail_is("2500 [2600 2700 2000] [2100]") && pb_roundtrip();
+    bool m3 = guild_move(2000, false, GM_BEFORE, 2600, false, err, sizeof err) && rail_is("2500 [2000 2600 2700] [2100]") && pb_roundtrip();
+    check(m2 && m3, "№2 перенос в папку (в конец и перед сервером папки), protobuf верный");
+    bool m4 = guild_move(2000, false, GM_AFTER, 2100, true, err, sizeof err) && rail_is("2500 [2600 2700] [2100] 2000") && pb_roundtrip();
+    check(m4, "№2 перенос из папки ниже другой папки, protobuf верный");
+    bool m5 = guild_move(2500, false, GM_NEWFOLDER, 2000, false, err, sizeof err) && rail_is("[2600 2700] [2100] [2000 2500]") && pb_roundtrip();
+    const GuildFolder *gn = folder_of(2500);
+    m5 = m5 && gn && gn->id && gn->id != 1 && gn->id != 2 && !gn->name;
+    check(m5, "№2 сервер на сервер — новая папка с новым id, protobuf верный");
+    bool m6 = guild_move(2600, true, GM_AFTER, 2100, true, err, sizeof err) && rail_is("[2100] [2600 2700] [2000 2500]") && pb_roundtrip();
+    bool m7 = !guild_move(2600, true, GM_INTO, 2100, false, err, sizeof err) && !guild_move(2700, false, GM_AFTER, 2600, false, err, sizeof err) &&
+              !guild_move(2600, false, GM_BEFORE, 2600, false, err, sizeof err) && rail_is("[2100] [2600 2700] [2000 2500]");
+    check(m6 && m7, "№2 папка целиком переставляется; папка в папку и «на то же место» — без изменений и без записи");
+    folders_test_pop();
+
+    /* 6. мышь и клавиатура на полосе: значок 2000 (y 6), папка без имени (y 10), «Игры» (y 14) */
+    folders_test_push();
+    CW = 120; CH = 34;
+    hover_off();
+    cur_take();
+    mouse_at(1, 3, 7);                           /* взять «Уютный уголок» */
+    mouse_at(6, 3, 12);
+    mouse_at(6, 3, 15);                          /* над серединой плитки «Игры» */
+    mouse_at(7, 3, 15);
+    bool d2 = rail_is("[2600 2700] [2100 2500 2000]");
+    cur_take();
+    mouse_at(1, 3, 11);                          /* взять плитку «Игры» (теперь вторая; папка целиком) — откроется, при протяжке закроется */
+    mouse_at(6, 3, 8);
+    mouse_at(7, 3, 6);                           /* на верхнюю строку первой плитки — перед ней */
+    bool d3 = rail_is("[2100 2500 2000] [2600 2700]");
+    check(d2 && d3, "№2 мышь: протяжка сервера в папку, протяжка папки целиком наверх");
+    folders_test_pop();
+    folders_test_push();
+    cur_take();
+    mouse_at(1, 3, 7);                           /* «Уютный уголок», фокус — каналы */
+    mouse_at(7, 3, 7);
+    key(K_ESC, 0);                               /* к серверам */
+    { Key k = { .code = K_DOWN, .alt = true }; ui_feed_key(&k); }
+    bool k1 = rail_is("[2600 2700] 2000 [2100 2500]");
+    { Key k = { .code = K_UP, .alt = true }; ui_feed_key(&k); }
+    bool k2 = rail_is("2000 [2600 2700] [2100 2500]");
+    key(K_DOWN, 0);                              /* Up/Down — по порядку полосы: следующий — первый сервер папки */
+    cur_take();
+    bool k3 = on_screen("Работа v");
+    check(k1 && k2 && k3, "№2 Alt+Down / Alt+Up в колонке серверов переставляют сервер; Down — по порядку полосы");
+    key(K_HOME, 0);
+    folders_test_pop();
+
+    /* 7. запись в Discord: сразу в интерфейсе; отказ — прежний порядок и причина; успех — порядок остаётся */
+    folders_test_push();
+    guild_order_test_hold(true);
+    bool w1 = guild_move(2500, false, GM_BEFORE, 2000, true, err, sizeof err) && guild_order_busy() && rail_is("2500 2000 [2600 2700] [2100]");
+    ev("USER_SETTINGS_PROTO_UPDATE", "{\"settings\":{\"type\":1,\"proto\":\"GAVyAA==\"}}");   /* чужое поле 14 пока запись идёт — не применяется */
+    w1 = w1 && rail_is("2500 2000 [2600 2700] [2100]");
+    guild_order_test_reply(403, "{\"message\":\"Missing Access\",\"code\":50001}");
+    CW = 160;
+    bool w2 = !guild_order_busy() && rail_is("2000 [2600 2700] [2100 2500]") && on_screen("порядок серверов не сохранён") && on_screen("Missing Access");
+    CW = 120;
+    check(w1 && w2, "№2 запись порядка: сразу на полосе; отказ Discord — прежний порядок и причина на экране");
+    bool w3 = guild_move(2500, false, GM_BEFORE, 2000, true, err, sizeof err) && guild_move(2100, false, GM_BEFORE, 2500, true, err, sizeof err);
+    guild_order_test_reply(200, NULL);           /* первая принята, вторая ещё не отправлена — уходит следом */
+    w3 = w3 && guild_order_busy();
+    Buf pb = {0}, body = {0};
+    guild_folders_pb(&pb);
+    buf_puts(&body, "{\"settings\":\"");
+    base64_enc(pb.p, pb.len, &body);
+    buf_puts(&body, "\"}");
+    guild_order_test_reply(200, body.p);
+    buf_free(&pb); buf_free(&body);
+    w3 = w3 && !guild_order_busy() && rail_is("2100 2500 2000 [2600 2700]");
+    check(w3, "№2 запись порядка: две перестановки подряд — вторая уходит после ответа на первую, итог как в ответе Discord");
+    guild_order_test_hold(false);
+    folders_test_pop();
+    /* как было до проверки: «Уютный уголок», #general, фокус в поле ввода */
+    hover_off();
+    ui_notice_clear();
+    key(K_HOME, 0);
+    key(K_DOWN, 0);
+    key(K_TAB, 0);
+    key(K_ENTER, 0);
+}
+
 /* Клавиатура (DESIGN.md раздел 13) — по сообщениям, F-клавиши, Home/End, русская раскладка. */
 static void t_keys(void) {
     const int W = 120, H = 34;
@@ -2489,6 +2661,8 @@ static void t_calls_vm(void) {
 }
 /* Пакет Б, часть 3 и ревью 11: кнопки ботов, полный профиль, запросы на переписку, группы, папки, слова-тревоги */
 void folders_test_proto(const char *b64);
+void folders_test_push(void);
+void folders_test_pop(void);
 bool ready_slim_check(const char *s, size_t n, char *why, size_t wn);
 void chan_remove_test(u64 id);
 static int ix_post;
@@ -2569,6 +2743,7 @@ static void t_packb3(void) {
     if (chan_find(3700)) chan_remove_test(3700);
     check(q1 && q2 && q3, "№109/111 запросы на переписку и спам (флаги, принять/отклонить), группа ЛС: владелец, добавить друга, исключить, выйти");
     /* №2 папки (protobuf как в user_settings_proto) */
+    folders_test_push();
     Buf ids = {0}, f = {0}, w = {0}, fs = {0}, top = {0}, b64 = {0};
     u64 g1 = 2000, g2 = 2100;
     for (int k = 0; k < 8; k++) buf_put(&ids, (const char *)&((u8 *)&g1)[k], 1);
@@ -2609,6 +2784,7 @@ static void t_packb3(void) {
     folders_test_proto("!!!испорчено");
     bool f2 = guild_folders(&gf) == 0;
     buf_free(&ids); buf_free(&f); buf_free(&w); buf_free(&fs); buf_free(&top); buf_free(&b64);
+    folders_test_pop();
     check(f1 && f2, "№2 папки серверов: protobuf user_settings_proto (id, имя, цвет, серверы); испорченный — без папок");
 
     /* №119 слова-тревоги */
@@ -3810,15 +3986,17 @@ int selftest(void) {
     {   /* №2: демо-READY — две папки из user_settings_proto (с именем и цветом; без имени) */
         const GuildFolder *gf;
         int nd = guild_folders(&gf);
-        bool f3 = nd == 2 && gf[0].name && !strcmp(gf[0].name, "Игры") && gf[0].color == 0x3BA55C && gf[0].n == 2 && gf[0].gids[1] == 2500 &&
-                  !gf[1].name && !gf[1].has_color && gf[1].n == 2 && gf[1].gids[0] == 2600;
-        check(f3, "№2 демо: две папки из user_settings_proto демо-READY");
+        bool f3 = nd == 11 && !gf[0].name && !gf[0].has_color && gf[0].n == 2 && gf[0].gids[0] == 2600 &&
+                  gf[1].name && !strcmp(gf[1].name, "Игры") && gf[1].color == 0x3BA55C && gf[1].n == 2 && gf[1].gids[1] == 2500 &&
+                  !gf[2].id && gf[2].n == 1 && gf[2].gids[0] == 2200 && gf[10].gids[0] == 2208;
+        check(f3, "№2 демо: две папки и 9 одиночных серверов из user_settings_proto демо-READY");
     }
     key(K_DOWN, 0);                              /* «Уютный уголок» */
     key(K_TAB, 0);                               /* каналы */
     key(K_ENTER, 0);                             /* первый — #general, фокус уходит в поле ввода */
 
     term_puts("\n  данные и разбор:\n");     t_data();
+    term_puts("\n  порядок серверов:\n");    t_guild_order();
     term_puts("\n  размеры экрана:\n");      t_sizes();
     term_puts("\n  фокус:\n");               t_focus();
     term_puts("\n  прокрутка:\n");           t_scroll();
