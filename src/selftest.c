@@ -2876,6 +2876,56 @@ static void t_audio_dev(void) {
         voice_vad_adjust(vad0 - voice_vad_db());
         check(back && junk && head, "настройки голоса: громкость микрофона, порог, шумоподавление, фильтр, громкость собеседника и устройство записываются и читаются обратно; мусор и чужая запись не применяются");
     }
+    {   /* громкость звука трансляций: sv=ID:pct, выключенный — sv=ID:pct:m; отдельно от v= того же человека */
+        static char vb[2600];
+        voice_stream_volume_set(5151, 0.3f);
+        voice_stream_volume_set(5252, 1.5f);
+        voice_stream_mute_set(5252, true);
+        voice_stream_mute_set(5353, true);       /* выключен при 100 % — тоже сохраняется */
+        voice_set_volume(5151, 0.8f);
+        int n = voice_settings_format(vb, sizeof vb);
+        bool txt = n > 0 && strstr(vb, "\nsv=5151:30\n") && strstr(vb, "\nsv=5252:150:m\n") && strstr(vb, "\nsv=5353:100:m\n") &&
+                   strstr(vb, "\nv=5151:80\n") && !strstr(vb, "\nv=5252:");
+        voice_stream_volume_set(5151, 1.0f);
+        voice_stream_volume_set(5252, 1.0f);
+        voice_stream_mute_set(5252, false);
+        voice_stream_mute_set(5353, false);
+        voice_set_volume(5151, 1.0f);
+        static char vb2[2600];
+        voice_settings_format(vb2, sizeof vb2);
+        bool dflt = !strstr(vb2, "sv=");          /* 100 % и звук включён — не пишется */
+        bool rd = voice_settings_parse(vb);
+        bool back = rd && voice_stream_volume(5151) > 0.29f && voice_stream_volume(5151) < 0.31f && !voice_stream_muted(5151) &&
+                    voice_stream_volume(5252) > 1.49f && voice_stream_volume(5252) < 1.51f && voice_stream_muted(5252) &&
+                    voice_stream_muted(5353) && voice_get_volume(5151) > 0.79f && voice_get_volume(5151) < 0.81f &&
+                    voice_get_volume(5252) == 1.0f;
+        voice_stream_volume_set(5151, 1.0f);
+        voice_stream_volume_set(5252, 1.0f);
+        voice_stream_mute_set(5252, false);
+        voice_stream_mute_set(5353, false);
+        voice_set_volume(5151, 1.0f);
+        bool junk = voice_settings_parse("astra-voice 1\nsv=0:50\nsv=77:201\nsv=78:-5\nsv=79:50:x\nsv=80:50m\nsv=81\nsv=82:\n"
+                                         "sv=-83:50\nsv=+84:50\nsv=85: 50\nsv=86:50:m:m\nsv=abc:50\nsv=89:50:\nsv=90::m\nsv=87:70\n");
+        bool bad = true;
+        for (u64 id = 77; id <= 90; id++) if (id != 87 && (voice_stream_volume(id) != 1.0f || voice_stream_muted(id))) bad = false;
+        junk = junk && bad && voice_stream_volume(87) > 0.69f && voice_stream_volume(87) < 0.71f && !voice_stream_muted(87);
+        voice_stream_volume_set(87, 1.0f);
+        /* предел записи (Windows, ~2500 байт): 64 трансляции с длинными ID и выключенным звуком — запись целыми
+         * строками и не длиннее предела; 65-я при полном списке не принимается */
+        static char big[2500];
+        for (int i = 0; i < 64; i++) { voice_stream_volume_set(1000000000000000000ull + (u64)i, 1.5f); voice_stream_mute_set(1000000000000000000ull + (u64)i, true); }
+        voice_stream_volume_set(2000000000000000000ull, 0.5f);
+        bool full = voice_stream_volume(2000000000000000000ull) == 1.0f;
+        int bn = voice_settings_format(big, sizeof big);
+        bool lim = bn > 0 && bn < (int)sizeof big && big[bn - 1] == '\n' && strstr(big, "sv=1000000000000000063:150:m\n");
+        for (int i = 0; i < 64; i++) { voice_stream_volume_set(1000000000000000000ull + (u64)i, 1.0f); voice_stream_mute_set(1000000000000000000ull + (u64)i, false); }
+        voice_stream_volume_set(2000000000000000000ull, 0.5f);   /* место освободилось — принимается */
+        bool reuse = voice_stream_volume(2000000000000000000ull) > 0.49f && voice_stream_volume(2000000000000000000ull) < 0.51f;
+        voice_stream_volume_set(2000000000000000000ull, 1.0f);
+        check(txt && dflt && back, "громкость трансляции: sv=ID:pct и sv=ID:pct:m записываются и читаются обратно, отдельно от v= того же человека; 100 % не пишется");
+        check(junk, "громкость трансляции: испорченные строки sv= (ID 0, >200 %, минус, хвосты, пустые) не применяются, следующая верная — применяется");
+        check(full && lim && reuse, "громкость трансляции: 64 записи с длинными ID влезают в предел записи целыми строками; 65-я — только на место значения по умолчанию");
+    }
 #if !defined(_WIN32) && !defined(__APPLE__)
     {   /* ALSA: служебные PCM не попадают в выбор; вывод стартует с 10 мс в буфере (PipeWire: раньше не стартовал) */
         bool audio_alsa_name_ok(const char *name);

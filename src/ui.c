@@ -94,6 +94,7 @@ enum {
     A_AR_LIST,                                   /* arg: 0 список друзей, 1 результаты поиска, 2 выбор друга */
     A_AR_TXT,                                    /* блок текстового вложения (колесо): arg — индекс в S.msgs */
     A_AR_MEMB,                                   /* список участников сервера справа (колесо) */
+    A_AR_WATCH,                                  /* видео чужой трансляции (колесо — громкость её звука) */
     A_BLOCK,                                     /* фон карточки или меню: клик не проходит насквозь */
     A_GUILD, A_ROW, A_MSG, A_REACT, A_MENU, A_BTN, A_INPUT,
     A_OPENCH,                                    /* arg — индекс в S.chans (экран «Друзья») */
@@ -141,7 +142,7 @@ enum {
     B_PING, B_PINS, B_INBOX, B_PRESENT, B_STATUS, B_CARD_BLOCK, B_CARD_ADD, B_NEWMSG,
     B_PINS_MORE, B_INBOX_T0, B_INBOX_T1, B_ACK_ALL, B_EP_X, B_EMOJI, B_CAP_GO, B_CAP_NO,
     B_ADDSRV, B_GMENU, B_GINVITE, B_ADDFRIEND, B_TXT_EXP, B_TXT_DL, B_STARTASK, B_RV_X, B_EPH_HIDE, B_EMBEDS, B_MRETRY, B_MDISCARD,
-    B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS, B_NS_OFF, B_NS_SPX, B_NS_RNN, B_WATCH, B_WATCH_STOP, B_WATCH_PICK, B_WATCH_FULL, B_WATCH_CHAT, B_WATCH_SHOW, B_CAM, B_CAM_PV, B_CAM_VIEW, B_CAM_TILE, B_ANON, B_MICG_DN, B_MICG_UP, B_MICG_0, B_HIDECAP,
+    B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS, B_NS_OFF, B_NS_SPX, B_NS_RNN, B_WATCH, B_WATCH_STOP, B_WATCH_PICK, B_WATCH_FULL, B_WATCH_CHAT, B_WATCH_SHOW, B_CAM, B_CAM_PV, B_CAM_VIEW, B_CAM_TILE, B_ANON, B_MICG_DN, B_MICG_UP, B_MICG_0, B_HIDECAP, B_WSV_DN, B_WSV_UP, B_WSV_0, B_WSV_MUTE,
     B_SP_PREV, B_SP_NEXT
 };
 enum { MI_REPLY = 1, MI_EDIT, MI_DELETE, MI_REACT, MI_COPY,
@@ -167,7 +168,7 @@ enum { T_NONE, T_INVITE, T_EVENTS, T_BOOST, T_MIC, T_DEAF, T_SET, T_LEAVE, T_CAM
        T_NOISE, T_ADDSRV, T_MEMBERS, T_HELP, T_CALL, T_GIFT, T_GIF, T_STICKER, T_EMOJI, T_HOME, T_ATTACH,
        T_CHATX, T_SEARCH, T_E2EE, T_ADDDM, T_FRTAB, T_NITRO, T_VSTAT, T_CHSET, T_FIND, T_MORE, T_WRITE, T_MB_REACT, T_MB_REPLY, T_MB_EDIT, T_PING, T_PINS, T_INBOX, T_STATUS, T_NEWMSG, T_DATE
 #ifdef ASTRA_VIDEO
-       , T_WSTOP, T_WFULL, T_WCHAT, T_WPICK, T_WSHOW, T_CAMPV, T_CAMOFF, T_CAMVIEW, T_ANON
+       , T_WSTOP, T_WFULL, T_WCHAT, T_WPICK, T_WSHOW, T_CAMPV, T_CAMOFF, T_CAMVIEW, T_ANON, T_WSVOL, T_WSMUTE
 #endif
        , T_END };
 #ifdef ASTRA_VIDEO
@@ -192,6 +193,7 @@ static const char *const TIPS[] = {
     "Выйти из просмотра", "Во весь экран и обратно (Alt+F, Esc)", "Показать чат, просмотр идёт (Alt+W)",
     "Смотреть эту трансляцию (Alt+стрелки)", "Показать трансляцию (Alt+W)",
     "Скрыть или показать себя", "Выключить камеру (F12, Alt+C)", "Смотреть камеру крупно (Alt+стрелки - соседняя)", "Скрывать глаза: вкл/выкл (Alt+E)",
+    "Громкость звука трансляции (Alt+- Alt+=, колесо над видео)", "Звук трансляции: вкл/выкл (Alt+M)",
 #endif
 };
 _Static_assert(sizeof TIPS / sizeof *TIPS == T_END, "TIPS и T_* разошлись");
@@ -7981,6 +7983,19 @@ static void wv_step(int d) {                    /* Alt+стрелки: сосе�
     for (int i = 0; i < n; i++) if (WV.cam ? WV.sk[i] && WV.su[i] == WV.cam : !WV.sk[i] && WV.su[i] == WS.user) cur = i;
     if (n > 0) wv_pick(cur < 0 ? 0 : (cur + d + n) % n);
 }
+/* Громкость звука смотримой трансляции (отдельно от голоса стримера): d = -1/+1 — шаг 10 %, 0 — 100 %. */
+static void wv_svol(int d) {
+    u64 u = WS.user;
+    if (WV.cam || WS.phase == GW_OFF || !u) return;
+    voice_stream_volume_set(u, d ? voice_stream_volume(u) + d * 0.1f : 1.0f);
+    U.dirty = true;
+}
+static void wv_smute(void) {
+    u64 u = WS.user;
+    if (WV.cam || WS.phase == GW_OFF || !u) return;
+    voice_stream_mute_set(u, !voice_stream_muted(u));
+    U.dirty = true;
+}
 static bool wv_key(const Key *k) {
     bool alt = k->alt && !k->ctrl;
     if (k->code == K_ESC && WV.full && !WV.chat && !U.menu && !U.card_uid && !U.ep && !U.qs && !FM.id) { WV.full = false; U.full = U.dirty = true; return true; }
@@ -7989,6 +8004,13 @@ static bool wv_key(const Key *k) {
         u32 c = k->ch;
         if (c == 'w' || c == 'W' || c == 0x446 || c == 0x426) { WV.chat = !WV.chat; WV.ch = S.open_ch; WV.gd = U.sel_guild; U.full = U.dirty = true; return true; }   /* ц */
         if ((c == 'f' || c == 'F' || c == 0x430 || c == 0x410) && !WV.chat) { WV.full = !WV.full; U.full = U.dirty = true; return true; }   /* а */
+        /* звук трансляции: Alt+- / Alt+= (Alt++) — громкость, Alt+0 — 100 %, Alt+M (Alt+ь) — вкл/выкл */
+        if (!WV.cam && WS.phase != GW_OFF) {
+            if (c == '-' || c == '_') { wv_svol(-1); return true; }
+            if (c == '=' || c == '+') { wv_svol(1); return true; }
+            if (c == '0') { wv_svol(0); return true; }
+            if (c == 'm' || c == 'M' || c == 0x44C || c == 0x42C) { wv_smute(); return true; }
+        }
     }
     return false;
 }
@@ -7997,6 +8019,28 @@ static void wv_rbtn(int *right, const char *t, int style, int id, int tip) {   /
     *right -= w;
     if (g_button(*right, 0, t, w, style, id)) U.hit[U.nhit - 1].tip = (u8)tip;
     *right -= 1;
+}
+/* строка под видео: «Звук трансляции: 80 % [-10 %] [+10 %] [100 %] [Выкл. звук]     Alt+- Alt+= Alt+M» */
+static void wv_svol_row(int x, int w, int y) {
+    u64 u = WS.user;
+    bool m = voice_stream_muted(u), narrow = w < 72;
+    int pc = (int)(voice_stream_volume(u) * 100 + 0.5f), r = x + w - 1, px = x + 1;
+    char val[48];
+    if (m) snprintf(val, sizeof val, "%s (%d %%)", TR("выкл."), pc);
+    else snprintf(val, sizeof val, "%d %%", pc);
+    px += g_text(px, y, narrow ? TR("Звук:") : TR("Звук трансляции:"), r - px, C_MUTED, AT_B) + 1;
+    if (r - px > 0) px += g_text(px, y, val, r - px, m ? C_RED : C_WHITE, AT_B) + 1;
+    struct { const char *t; int id, tip; bool on; } b[] = {
+        { TR("-10 %"), B_WSV_DN, T_WSVOL, true }, { TR("+10 %"), B_WSV_UP, T_WSVOL, true },
+        { TR("100 %"), B_WSV_0, T_WSVOL, pc != 100 }, { m ? TR("Вкл. звук") : TR("Выкл. звук"), B_WSV_MUTE, T_WSMUTE, true },
+    };
+    for (int i = 0; i < 4; i++) {
+        if (!b[i].on || vw(b[i].t) + 4 > r - px) continue;
+        px += g_button(px, y, b[i].t, r - px, i == 3 && m ? 1 : 0, b[i].id) + 1;
+        U.hit[U.nhit - 1].tip = (u8)b[i].tip;
+    }
+    const char *hint = "Alt+- Alt+= Alt+M";
+    if (!narrow && r - px > vw(hint) + 2) g_rtext(r - 1, y, hint, vw(hint), C_MUTED, 0);
 }
 static void draw_watch(int x, int w, int H) {
     g_rect(x, 0, w, H, C_FEED);
@@ -8053,6 +8097,10 @@ static void draw_watch(int x, int w, int H) {
     int vx = x + 1, vy = y + 1, vwd = w - 2, vh = H - 2 - vy;
     if (vh < 1) vh = 1;
     g_rect(vx, vy, vwd, vh, 0x000000u);
+    if (!WV.cam && WS.phase != GW_OFF && WS.user) {
+        hit_add(vx, vy, vwd, vh, A_AR_WATCH, 0, 0, 0);   /* колесо над видео — громкость звука трансляции */
+        if (H - 2 > vy) wv_svol_row(x, w, H - 2);
+    }
     int cy = vy + vh / 2;
     if (WV.cam) cu_frame(vx, vy, vwd, vh, WV.cam);   /* камера крупно: окно отдаёт полный кадр под размер области */
     else if (WS.phase == GW_FAILED) {
@@ -10485,6 +10533,9 @@ static void wheel(int x, int y, bool up) {
     case A_AR_RAIL: U.guild_free = true; U.guild_scroll += up ? -1 : 1; break;
     case A_AR_CHANS: U.row_free = true; U.row_scroll += up ? -3 : 3; break;
     case A_AR_MEMB: MB.top += up ? -3 : 3; if (MB.top < 0) MB.top = 0; break;   /* верх — draw_members */
+#ifdef ASTRA_VIDEO
+    case A_AR_WATCH: wv_svol(up ? 1 : -1); break;   /* колесо над видео трансляции — громкость её звука */
+#endif
     case A_AR_TXT: {
         /* колесо над развёрнутым текстом — прокрутка внутри блока */
         for (int i = U.nhit - 1; i >= 0; i--) if (U.hit[i].act == A_AR_TXT && hit_in(&U.hit[i], x, y)) {
@@ -10588,6 +10639,10 @@ static void button(int id, int x, int y) {
     case B_WATCH_FULL: WV.full = !WV.full; U.full = true; break;
     case B_WATCH_CHAT: WV.chat = true; U.full = true; break;
     case B_WATCH_SHOW: WV.chat = false; WV.ch = S.open_ch; WV.gd = U.sel_guild; U.full = true; break;
+    case B_WSV_DN: wv_svol(-1); break;
+    case B_WSV_UP: wv_svol(1); break;
+    case B_WSV_0: wv_svol(0); break;
+    case B_WSV_MUTE: wv_smute(); break;
     case B_CAM: cu_toggle(!cu_on()); break;
     case B_CAM_PV: cu_pv_hide = !cu_pv_hide; U.full = true; break;
     case B_ANON: cu_anon_toggle(); break;
@@ -10994,7 +11049,7 @@ static void handle_key(const Key *k) {
     if (k->code == K_ENTER && k->alt && !k->ctrl && full_toggle()) return;
     if (!LG.on && k->code == K_CHAR && k->alt && !k->ctrl && k->ch >= '1' && k->ch <= '9' && (int)(k->ch - '1') < TB.n) { tab_go((int)(k->ch - '1')); return; }
 #ifdef ASTRA_VIDEO
-    if (!LG.on && !U.help && !U.settings && wv_on() && wv_key(k)) return;   /* просмотр трансляции: Alt+W, Alt+F, Alt+стрелки, Esc */
+    if (!LG.on && !U.help && !U.settings && wv_on() && wv_key(k)) return;   /* просмотр трансляции: Alt+W, Alt+F, Alt+стрелки, Esc; звук трансляции: Alt+- Alt+= Alt+0 Alt+M */
 #endif
     if (!LG.on && k->code == K_CHAR && k->ctrl && !k->alt && (k->ch == 'w' || k->ch == 'W' || k->ch == 0x446 || k->ch == 0x426) && TB.n && !(U.focus == F_INPUT && U.in.len)) { tab_close(tab_pos(S.open_ch)); return; }   /* в поле с текстом Ctrl+W стирает слово */   /* №16; в консоли Alt+Enter — перенос строки */
     if (k->code == K_CHAR && k->ctrl && !k->alt && (k->ch == '=' || k->ch == '+' || k->ch == '-' || k->ch == '_' || k->ch == '0')) {
