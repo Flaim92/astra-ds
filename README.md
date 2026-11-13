@@ -15,6 +15,10 @@ C11 · Windows, Linux и macOS · без Electron, без браузера, бе
 ![Функции Discord](https://img.shields.io/badge/функции_Discord-86%25-f0b232)
 ![Лицензия GPL-3.0](https://img.shields.io/badge/лицензия-GPL--3.0-blue)
 
+[![Telegram](https://img.shields.io/badge/Telegram-@astradsoff-26A5E4?logo=telegram&logoColor=white)](https://t.me/astradsoff)
+
+**📣 [Канал в Telegram](https://t.me/astradsoff): новости, релизы и обсуждение**
+
 ![Astra DS](docs/screenshots/main.png)
 
 *Окно в стиле Discord, нарисованное цветными символами: опросы, голосовое сообщение, кнопки бота и карточка ссылки. Всё на выдуманных данных демо-режима.*
