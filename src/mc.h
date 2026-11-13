@@ -444,7 +444,7 @@ int guild_rail(RailEnt **out);                             /* *out — в куч
  * src — сервер; whole — двигать его папку целиком. ref — сервер-ориентир; ref_top — относительно записи верхнего
  * уровня, где ref (его папки целиком), иначе — внутри папки ref. GM_INTO — в конец папки ref; GM_NEWFOLDER —
  * новая папка из ref и src. false — не изменилось (err — причина, если есть). */
-enum { GM_BEFORE, GM_AFTER, GM_INTO, GM_NEWFOLDER };
+enum { GM_BEFORE, GM_AFTER, GM_INTO };
 bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, size_t errn);
 void guild_folders_pb(Buf *out);                           /* protobuf PreloadedUserSettings только с полем 14 */
 bool guild_order_busy(void);                               /* запись порядка ещё не подтверждена */

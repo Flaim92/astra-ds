@@ -7539,8 +7539,8 @@ static bool rail_target(int x, int y, RailDrop *d) {
         else if (open && !GD.whole) { d->how = GM_BEFORE; d->top = false; d->line_y = y0 + 3; }   /* в начало папки */
         else { d->how = GM_AFTER; d->top = true; d->line_y = y0 + 3; }
     } else if (t->fk < 0) {                     /* сервер верхнего уровня */
-        if (r == 0) { d->how = GM_BEFORE; d->top = true; d->line_y = y0 - 1; }
-        else if (r == 1 && !GD.whole && t->gid != GD.gid) { d->how = GM_NEWFOLDER; d->box_y = y0; }
+        /* сервер на сервер — только перестановка (новые папки перетаскиванием не создаются) */
+        if (r <= 1) { d->how = GM_BEFORE; d->top = true; d->line_y = y0 - 1; }
         else { d->how = GM_AFTER; d->top = true; d->line_y = y0 + 3; }
     } else {                                    /* сервер в развёрнутой папке */
         d->top = GD.whole;

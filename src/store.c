@@ -4318,16 +4318,6 @@ static void fd_materialize(void) {
     for (int i = 0; i < n; i++) if (r[i].fk == RAIL_NEW) fd_insert(m++, fd_single(r[i].gid));
     free(r);
 }
-static i64 fd_new_id(void) {
-    u64 x = (u64)wall_ms() * 0x9E3779B97F4A7C15ULL;
-    for (;;) {
-        i64 id = (i64)(x >> 33) + 1;            /* как у официального клиента: случайное до 2^32 */
-        bool used = false;
-        for (int k = 0; k < nfd; k++) if (FD[k].id == id) used = true;
-        if (!used) return id;
-        x = x * 6364136223846793005ULL + 1442695040888963407ULL;
-    }
-}
 bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, size_t errn) {
     if (err && errn) *err = 0;
     if (!fd_known || fd_lossy) { if (err) snprintf(err, errn, "%s", ui_tr("порядок серверов ещё не получен от Discord")); return false; }
@@ -4341,7 +4331,6 @@ bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, 
     if (whole && sfk < 0) whole = false;
     if (whole && sfk == rfk) return false;      /* папку — относительно самой себя */
     if (how == GM_INTO && (whole || rfk < 0)) return false;
-    if (how == GM_NEWFOLDER && (whole || rfk >= 0)) return false;
     bool first = !fdc_on;
     if (first) { FDC = fd_dup(FD, nfd); nfdc = nfd; fdc_on = true; }
     Buf before = {0}, after = {0};
@@ -4361,14 +4350,7 @@ bool guild_move(u64 src, bool whole, int how, u64 ref, bool ref_top, char *err, 
         if (in) gids_insert(&FD[rk], rq + (how == GM_AFTER), src);
         else { fd_insert(rk + (how == GM_AFTER), moved); memset(&moved, 0, sizeof moved); }
     } else if (how == GM_INTO) gids_insert(&FD[rk], FD[rk].n, src);
-    else {                                      /* GM_NEWFOLDER: ref и src — новая папка на месте ref */
-        FD[rk].id = fd_new_id();
-        Buf m = {0};
-        pbw_wrapped_u(&m, 2, (u64)FD[rk].id);
-        meta_add(&FD[rk], m.p, m.len);
-        buf_free(&m);
-        gids_insert(&FD[rk], FD[rk].n, src);
-    }
+    else return false;
     fd_entry_free(&moved);
     fd_encode(&after);
     bool same = before.len == after.len && (!before.len || !memcmp(before.p, after.p, before.len));

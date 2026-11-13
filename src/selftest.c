@@ -723,13 +723,12 @@ static void t_guild_order(void) {
     check(m2 && m3, "№2 перенос в папку (в конец и перед сервером папки), protobuf верный");
     bool m4 = guild_move(2000, false, GM_AFTER, 2100, true, err, sizeof err) && rail_is("2500 [2600 2700] [2100] 2000") && pb_roundtrip();
     check(m4, "№2 перенос из папки ниже другой папки, protobuf верный");
-    bool m5 = guild_move(2500, false, GM_NEWFOLDER, 2000, false, err, sizeof err) && rail_is("[2600 2700] [2100] [2000 2500]") && pb_roundtrip();
-    const GuildFolder *gn = folder_of(2500);
-    m5 = m5 && gn && gn->id && gn->id != 1 && gn->id != 2 && !gn->name;
-    check(m5, "№2 сервер на сервер — новая папка с новым id, protobuf верный");
-    bool m6 = guild_move(2600, true, GM_AFTER, 2100, true, err, sizeof err) && rail_is("[2100] [2600 2700] [2000 2500]") && pb_roundtrip();
+    bool m5 = guild_move(2500, false, GM_AFTER, 2000, true, err, sizeof err) && rail_is("[2600 2700] [2100] 2000 2500") && pb_roundtrip() &&
+              !guild_move(2500, false, GM_INTO, 2000, false, err, sizeof err) && rail_is("[2600 2700] [2100] 2000 2500");
+    check(m5, "№2 сервер на сервер — только перестановка, новая папка не создаётся; protobuf верный");
+    bool m6 = guild_move(2600, true, GM_AFTER, 2100, true, err, sizeof err) && rail_is("[2100] [2600 2700] 2000 2500") && pb_roundtrip();
     bool m7 = !guild_move(2600, true, GM_INTO, 2100, false, err, sizeof err) && !guild_move(2700, false, GM_AFTER, 2600, false, err, sizeof err) &&
-              !guild_move(2600, false, GM_BEFORE, 2600, false, err, sizeof err) && rail_is("[2100] [2600 2700] [2000 2500]");
+              !guild_move(2600, false, GM_BEFORE, 2600, false, err, sizeof err) && rail_is("[2100] [2600 2700] 2000 2500");
     check(m6 && m7, "№2 папка целиком переставляется; папка в папку и «на то же место» — без изменений и без записи");
     folders_test_pop();
 
