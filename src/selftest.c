@@ -3401,6 +3401,37 @@ static bool tr_same_convs(const char *a, const char *b) {
         if (strcmp(ca, cb)) return false;
     }
 }
+#ifdef ASTRA_VIDEO
+/* Full HD трансляции только с Nitro (premium_type 1 и 2, как у Discord), параметры кодера и op 12 для шлюза. */
+static void t_share_quality(void) {
+    term_puts("\n  трансляция: качество и Nitro (share.h, op 12):\n");
+    bool a0 = share_quality_allowed(SHARE_Q_1080, 0), a1 = share_quality_allowed(SHARE_Q_1080, 1),
+         a2 = share_quality_allowed(SHARE_Q_1080, 2), a3 = share_quality_allowed(SHARE_Q_1080, 3);
+    check(!a0, "трансляция: без Nitro (premium_type 0) 1080p недоступен");
+    check(a1 && a2 && !a3, "трансляция: 1080p доступен с premium_type 1 и 2, с 3 (Nitro Basic) нет");
+    bool all720 = true;
+    for (int pt = 0; pt <= 3; pt++) all720 = all720 && share_quality_allowed(SHARE_Q_720, pt) && share_quality_allowed(SHARE_Q_720_ECO, pt);
+    check(all720 && !share_quality_allowed(-1, 2) && !share_quality_allowed(SHARE_Q_N, 2), "трансляция: 720p - всем, чужие номера режима - никому");
+    ShareQuality q7 = share_quality(SHARE_Q_720), qe = share_quality(SHARE_Q_720_ECO), q10 = share_quality(SHARE_Q_1080);
+    check(q7.w == 1280 && q7.h == 720 && q7.fps == 30 && q7.kbps == 1800 && q7.kbps_max == 3500
+          && qe.w == 1280 && qe.h == 720 && qe.kbps == 1000 && qe.kbps_max == 2000
+          && q10.w == 1920 && q10.h == 1080 && q10.fps == 30 && q10.kbps == 4000 && q10.kbps_max == 6000,
+          "трансляция: 720p30 1,8/3,5 Мбит/с, экономный 1/2, 1080p30 4/6 Мбит/с");
+    char b[640];
+    int k7 = voice_stream_op12_json(b, sizeof b, 11, 22, 23, q7.w, q7.h, q7.fps, q7.kbps_max * 1000);
+    bool o7 = k7 > 0 && strstr(b, "\"op\":12") && strstr(b, "\"audio_ssrc\":11,\"video_ssrc\":22,\"rtx_ssrc\":23")
+              && strstr(b, "\"rid\":\"100\",\"ssrc\":22,\"active\":true,\"quality\":100,\"rtx_ssrc\":23,\"max_bitrate\":3500000,")
+              && strstr(b, "\"max_framerate\":30,\"max_resolution\":{\"type\":\"fixed\",\"width\":1280,\"height\":720}");
+    int k10 = voice_stream_op12_json(b, sizeof b, 11, 22, 23, q10.w, q10.h, q10.fps, q10.kbps_max * 1000);
+    bool o10 = k10 > 0 && strstr(b, "\"max_bitrate\":6000000,") && strstr(b, "\"max_framerate\":30,\"max_resolution\":{\"type\":\"fixed\",\"width\":1920,\"height\":1080}");
+    int k0 = voice_stream_op12_json(b, sizeof b, 11, 22, 23, 0, 0, 0, 0);   /* качество ещё неизвестно - 720p30 */
+    bool o0 = k0 > 0 && strstr(b, "\"max_bitrate\":3500000,") && strstr(b, "\"width\":1280,\"height\":720");
+    check(o7 && o10 && o0, "трансляция: op 12 - 720p: 1280x720, 30 к/с, 3,5 Мбит/с; 1080p: 1920x1080, 30 к/с, 6 Мбит/с; без данных - 720p");
+    check(voice_stream_op12_json(b, 64, 11, 22, 23, 1920, 1080, 30, 6000000) == -1, "трансляция: op 12 в тесный буфер - отказ, не обрезок");
+    int ui_share_selftest(void (*ck)(bool ok, const char *what));
+    ui_share_selftest(check);
+}
+#endif
 static void t_tr_table(void) {
     size_t n = sizeof TR_EN / sizeof *TR_EN, fmt = 0, ord = 0, miss = 0;
     bool e = g_lang_en;
@@ -4030,6 +4061,7 @@ int selftest(void) {
     demo_en_selftest(check);
 #ifdef ASTRA_VIDEO
     golive_selftest(check);
+    t_share_quality();
     {
         int voice_cam_selftest(void (*check)(bool ok, const char *what));
         term_puts("\n  камера (cam.c, voice_cam.c, без камеры и сети):\n");

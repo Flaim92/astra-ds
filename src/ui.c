@@ -3956,7 +3956,10 @@ static char sh_t[24][80];
 static const char *sh_names[25];
 static uintptr_t sh_ids[24];
 static int sh_n;
-static const char *const SH_MODES[] = { "720p 30 к/с, 1,8 Мбит/с", "720p 30 к/с, экономный поток 1 Мбит/с" };
+/* поле «КАЧЕСТВО»: индексы - SHARE_Q_* (share.h). Без Nitro (premium_type 0 и 3) пункт 1080p виден, но неактивен:
+ * серым, с подсказкой, «Начать трансляцию» на нём отказывает (как у Discord: Full HD - Nitro Classic и Nitro) */
+static const char *const SH_MODES[SHARE_Q_N] = { "720p 30 к/с, 1,8 Мбит/с", "720p 30 к/с, экономный поток 1 Мбит/с", "1080p 30 к/с, 4 Мбит/с (Nitro)" };
+static const char *const SH_MODES_NN[SHARE_Q_N] = { "720p 30 к/с, 1,8 Мбит/с", "720p 30 к/с, экономный поток 1 Мбит/с", "1080p 30 к/с - нужен Nitro" };
 static void share_ui_stop(const char *why) {
     if (!sh_running) return;
     golive_stop();
@@ -6581,7 +6584,8 @@ enum { FM_NONE, FM_ADDSRV, FM_GCREATE, FM_JOIN, FM_JOINCARD, FM_INVITE, FM_GSET,
 enum { FB_OK = 1, FB_CANCEL, FB_X1, FB_X2, FB_RETRY };     /* кнопки формы (sub у A_FORMB) */
 /* буфер поля — в куче на время окна: лимит поля в символах x 4 байта (тема 1024 символа целиком), иначе 256 */
 static void utf8_cpy(char *d, size_t n, const char *s);
-typedef struct { u8 kind; const char *label; char *val; size_t cap; int ch, nch; const char *const *chs; u32 oh; int och; int maxc; } FField;
+typedef struct { u8 kind; const char *label; char *val; size_t cap; int ch, nch; const char *const *chs; u32 oh; int och; int maxc;
+                 u32 dis; } FField;                /* dis: биты недоступных пунктов FF_CHOICE (видны серым) */
 static struct {
     int id, nf, foc;
     bool loading;                                /* значения ещё грузятся: поля не заполнены, «Сохранить» недоступно */
@@ -6821,7 +6825,7 @@ static void fm_open(int id, u64 gid, u64 cid) {
         sh_names[sh_n] = "Весь экран";
         snprintf(FM.title, sizeof FM.title, "%s", TR("Демонстрация экрана"));
 #ifdef _WIN32
-        snprintf(FM.sub, sizeof FM.sub, "%s", TR("Эфир 1280x720, 30 к/с. Окно: видно только оно, даже под другими окнами; свёрнутое - зрители видят последний кадр. Весь экран: видно всё. Astra DS в эфир не попадает, включится режим стримера."));
+        snprintf(FM.sub, sizeof FM.sub, "%s", TR("Эфир 720p, с Nitro - и 1080p, 30 к/с. Окно: видно только оно, даже под другими окнами; свёрнутое - зрители видят последний кадр. Весь экран: видно всё. Astra DS в эфир не попадает, включится режим стримера."));
 #else
         if (share_wayland()) {                   /* Wayland: экран или окно выбирается в системном окне компоновщика */
             sh_n = 0;
@@ -6831,7 +6835,12 @@ static void fm_open(int id, u64 gid, u64 cid) {
         snprintf(FM.sub, sizeof FM.sub, "%s", TR("Внимание: в X11 при показе всего экрана видны все окна, в том числе это."));
 #endif
         fm_choice(fm_add(FF_CHOICE, "ИСТОЧНИК", NULL), sh_names, sh_n + 1, 0);
-        fm_choice(fm_add(FF_CHOICE, "КАЧЕСТВО", NULL), SH_MODES, 2, 0);
+        {
+            bool nitro = share_quality_nitro(S.me_premium);
+            FField *qf = fm_add(FF_CHOICE, "КАЧЕСТВО", NULL);
+            fm_choice(qf, nitro ? SH_MODES : SH_MODES_NN, SHARE_Q_N, SHARE_Q_720);
+            if (!nitro) qf->dis = 1u << SHARE_Q_1080;
+        }
         fm_add(FF_TOGGLE, "Транслировать звук", NULL)->ch = 1;   /* окно — звук его программы; экран — всё, кроме Astra DS */
         fm_btn(TR("Отмена"), FB_CANCEL, 0); fm_btn(TR("Начать трансляцию"), FB_OK, 1);
         break;
@@ -7116,7 +7125,8 @@ static void draw_form(int W, int H) {
         g_pill(x - 1, y, iw + 2, C_RAIL);
         if (f->kind == FF_CHOICE) {
             g_text(x, y, "<", 1, C_TEXT, AT_B);
-            g_ctext(x + 2, y, iw - 4, f->nch ? tr(f->chs[f->ch]) : "", foc ? C_WHITE : C_TEXT, AT_B);
+            bool off = f->ch >= 0 && f->ch < 32 && (f->dis >> f->ch & 1);   /* недоступный пункт: серым, без жирного */
+            g_ctext(x + 2, y, iw - 4, f->nch ? tr(f->chs[f->ch]) : "", off ? C_MUTED : foc ? C_WHITE : C_TEXT, off ? 0 : AT_B);
             g_text(x + iw - 1, y, ">", 1, C_TEXT, AT_B);
             hit_add(x - 1, y, 3, 1, A_FORMF, 4, i, HV_UL);
             hit_add(x + iw - 2, y, 3, 1, A_FORMF, 5, i, HV_UL);
@@ -10248,6 +10258,11 @@ static void fm_submit(int bid) {
     case FM_SHARE: {
         int src = FM.f[0].ch;
         uintptr_t id = src < sh_n ? sh_ids[src] : 0;
+        if (!share_quality_allowed(FM.f[1].ch, S.me_premium)) {   /* 1080p без Nitro: пункт виден, но не запускается */
+            ok = false;
+            snprintf(err, sizeof err, "%s", TR("1080p - только с Nitro: выберите 720p"));
+            break;
+        }
         VoiceStatus v5;
         voice_status(&v5);
         share_audio_enable(FM.f[2].ch != 0);
@@ -10354,6 +10369,35 @@ static void fm_submit(int bid) {
     if (!ok) { char *e = san(err[0] ? err : TR("не получилось"), false); snprintf(FM.err, sizeof FM.err, "%s", e); free(e); return; }
     fm_close();
 }
+#ifdef ASTRA_VIDEO
+/* Проверка окна запуска трансляции (selftest): пункт 1080p есть всегда; без Nitro (0, 3) - серый с подсказкой и
+ * «Начать» отказывает, не трогая захват; с Nitro (1, 2) - обычный. Захват здесь не запускается. */
+int ui_share_selftest(void (*check)(bool ok, const char *what)) {
+    u8 pm = S.me_premium;
+    bool run = sh_running;
+    bool ok_nn = true, ok_n = true;
+    for (int p = 0; p <= 3; p++) {
+        S.me_premium = (u8)p;
+        fm_open(FM_SHARE, 0, 0);
+        FField *qf = &FM.f[1];
+        bool nitro = p == 1 || p == 2;
+        bool shown = FM.id == FM_SHARE && qf->kind == FF_CHOICE && qf->nch == SHARE_Q_N && qf->ch == SHARE_Q_720
+                     && strstr(qf->chs[SHARE_Q_1080], "1080p") != NULL;
+        bool off = (qf->dis >> SHARE_Q_1080 & 1) != 0, hint = strstr(qf->chs[SHARE_Q_1080], "нужен Nitro") != NULL;
+        if (nitro) ok_n = ok_n && shown && !off && !hint && !qf->dis;
+        else {
+            qf->ch = SHARE_Q_1080;
+            fm_submit(FB_OK);                    /* должен отказать до share_start */
+            ok_nn = ok_nn && shown && off && hint && FM.id == FM_SHARE && strstr(FM.err, "Nitro") && sh_running == run;
+        }
+        fm_close();
+    }
+    S.me_premium = pm;
+    check(ok_nn, "трансляция: без Nitro (premium_type 0 и 3) пункт 1080p виден серым с подсказкой «нужен Nitro», «Начать» отказывает");
+    check(ok_n, "трансляция: с Nitro (premium_type 1 и 2) пункт 1080p обычный, по умолчанию 720p");
+    return 0;
+}
+#endif
 /* Клавиатура окна-формы (модально). */
 static void fm_key(const Key *k) {
     int nfoc = FM.nf + FM.nb;

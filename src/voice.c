@@ -1164,14 +1164,9 @@ static void vw_text(VW *w, const char *text, size_t len) {
         }
         if (w->stream) {
             ShareState sh;
-            share_state(&sh);
-            int vw = sh.w > 0 ? sh.w : 1280, vh = sh.h > 0 ? sh.h : 720, vf = sh.fps > 0 ? sh.fps : 30;   /* как официальный: 720p30 */
+            share_state(&sh);                    /* размер, к/с и пик битрейта - по качеству эфира (share_quality) */
             char v[640];
-            snprintf(v, sizeof v, "{\"op\":12,\"d\":{\"audio_ssrc\":%u,\"video_ssrc\":%u,\"rtx_ssrc\":%u,\"streams\":[{\"type\":\"video\","
-                     "\"rid\":\"100\",\"ssrc\":%u,\"active\":true,\"quality\":100,\"rtx_ssrc\":%u,\"max_bitrate\":3500000,"
-                     "\"max_framerate\":%d,\"max_resolution\":{\"type\":\"fixed\",\"width\":%d,\"height\":%d}}]}}",
-                     (unsigned)w->ssrc, (unsigned)w->vssrc, (unsigned)w->vrtx, (unsigned)w->vssrc, (unsigned)w->vrtx, vf, vw, vh);
-            ws_text(w, v);
+            if (voice_stream_op12_json(v, sizeof v, w->ssrc, w->vssrc, w->vrtx, sh.w, sh.h, sh.fps, sh.kbps_max * 1000) > 0) ws_text(w, v);
             snprintf(v, sizeof v, "{\"op\":5,\"d\":{\"speaking\":1,\"delay\":0,\"ssrc\":%u}}", (unsigned)w->ssrc);
             ws_text(w, v);                      /* как у них: setSpeaking(true) вместе с видео */
             break;
