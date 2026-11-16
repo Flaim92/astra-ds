@@ -103,6 +103,7 @@ void store_reset(void) {
     for (int i = 0; i < S.nvs; i++) free(S.vs[i].name);
     free(S.users); free(S.guilds); free(S.chans); free(S.vs);
     free(S.me_name); free(S.session_id);
+    for (int i = 0; i < S.nrels; i++) free(S.rels[i].act);
     free(S.rels);
     msgs_clear();
     ml_close();
@@ -558,6 +559,7 @@ static void rel_del(u64 id) {
     bool f;
     int i = rel_idx(id, &f);
     if (!f) return;
+    free(S.rels[i].act);
     memmove(&S.rels[i], &S.rels[i + 1], (size_t)(S.nrels - i - 1) * sizeof(Relation));
     S.nrels--;
 }
@@ -585,6 +587,7 @@ const char *presence_name(u8 st) {
     }
 }
 /* {user_id | user:{id}, status} — только для друзей; возврат: изменилось ли */
+static void utf8_cut(char *s, size_t cap);
 static bool presence_apply(const cJSON *p) {
     u64 id = jid(p, "user_id");
     if (!id) id = jid(jget(p, "user"), "id");
@@ -592,9 +595,34 @@ static bool presence_apply(const cJSON *p) {
     int i = rel_idx(id, &f);
     if (!f || S.rels[i].type != REL_FRIEND) return false;
     u8 st = presence_code(jstr(p, "status"));
-    if (S.rels[i].status == st) return false;
-    S.rels[i].status = st;
-    return true;
+    Relation *R = &S.rels[i];
+    bool ch = R->status != st;
+    R->status = st;
+    /* «Активно сейчас»: первая игра / трансляция / музыка / просмотр / соревнование (тип 4 — свой статус — не здесь) */
+    const cJSON *acts = jget(p, "activities");
+    if (acts || st == PS_OFFLINE) {
+        const char *nm = NULL;
+        int ty = 0, k = 0;
+        i64 t0 = 0;
+        const cJSON *a;
+        if (st != PS_OFFLINE)
+            cJSON_ArrayForEach(a, acts) {
+                if (k++ >= 16) break;
+                i64 t = jint(a, "type", -1);
+                const char *n = jstr(a, "name");
+                if (t < 0 || t > 5 || t == 4 || !n || !*n) continue;
+                nm = n; ty = (int)t; t0 = jint(jget(a, "timestamps"), "start", 0);
+                break;
+            }
+        char *v = nm ? san(nm, false) : NULL;
+        if (v && strlen(v) > 64) { v[64] = 0; utf8_cut(v, 65); }
+        if ((!v) != (!R->act) || (v && strcmp(v, R->act)) || R->act_type != ty || R->act_start != t0) {
+            free(R->act);
+            R->act = v; R->act_type = (u8)ty; R->act_start = v ? t0 : 0;
+            ch = true;
+        } else free(v);
+    }
+    return ch;
 }
 
 /* Действия (записи): в демо — только локально, без сети. */
@@ -1512,6 +1540,7 @@ void mentions_open(void) {
 #define ACK_GAP 3000
 static struct { u64 ch, pend; i64 at; } AK[ACK_SLOTS];
 __attribute__((weak)) bool win_focused(void) { return true; }
+__attribute__((weak)) bool win_active(void) { return true; }
 static void ack_post(u64 ch, u64 msg, bool manual) {
     char path[112], body[96];
     snprintf(path, sizeof path, "/channels/%llu/messages/%llu/ack", (unsigned long long)ch, (unsigned long long)msg);
@@ -1600,6 +1629,7 @@ static const char *ps_word(u8 st) {
     return st == PS_IDLE ? "idle" : st == PS_DND ? "dnd" : st == PS_INVISIBLE ? "invisible" : "online";
 }
 const char *presence_word(void) { return ps_word(presence_me()); }   /* net.c: статус в IDENTIFY */
+static const char *game_activity_now(i64 *since);
 static void ps_send(u8 st) {
     if (!gw_online()) return;                   /* не в сети: статус уйдёт в IDENTIFY при подключении, не засчитываем */
     Buf b = {0};
@@ -1609,6 +1639,14 @@ static void ps_send(u8 st) {
         buf_json_str(&b, custom_status());
         buf_puts(&b, "}");
     }
+    i64 gsince = 0;
+    const char *gname = game_activity_now(&gsince);
+    if (gname) {                                /* «Играет в ...» — активность type 0 со временем начала */
+        if (*custom_status()) buf_puts(&b, ",");
+        buf_puts(&b, "{\"name\":");
+        buf_json_str(&b, gname);
+        buf_printf(&b, ",\"type\":0,\"timestamps\":{\"start\":%lld}}", (long long)gsince);
+    }
     buf_puts(&b, "],\"afk\":false}}");
     gw_send(b.p);
     buf_free(&b);
@@ -1616,6 +1654,160 @@ static void ps_send(u8 st) {
     ps_sent[4] = now_ms();
 }
 static bool ps_allowed(void) { return !ps_sent[0] || now_ms() - ps_sent[0] >= 20000; }
+/* ---------- №«играет в»: запущенная игра в статусе (как у официального клиента) ----------
+ * Включается в «Конфиденциальность» (по умолчанию выключено; выбор — в хранилище, запись "game"). Пока включено,
+ * раз в GAME_SCAN_MS снимается список процессов (plat_proc_names) и сверяется со встроенным списком игр по имени
+ * exe — без сети, без файлов, без чтения памяти чужих процессов. Нашлась/закрылась — op 3 с активностью type 0
+ * («Играет в ...», время с начала), под тем же пределом частоты, что и смена статуса. */
+#define GAME_SCAN_MS 15000
+static const struct { const char *exe, *name; } GAMES[] = {
+    { "cs2.exe", "Counter-Strike 2" },
+    { "csgo.exe", "Counter-Strike: Global Offensive" },
+    { "dota2.exe", "Dota 2" },
+    { "VALORANT-Win64-Shipping.exe", "VALORANT" },
+    { "League of Legends.exe", "League of Legends" },
+    { "FortniteClient-Win64-Shipping.exe", "Fortnite" },
+    { "GTA5.exe", "Grand Theft Auto V" },
+    { "GTA5_Enhanced.exe", "Grand Theft Auto V" },
+    { "RDR2.exe", "Red Dead Redemption 2" },
+    { "eldenring.exe", "ELDEN RING" },
+    { "r5apex.exe", "Apex Legends" },
+    { "r5apex_dx12.exe", "Apex Legends" },
+    { "RobloxPlayerBeta.exe", "Roblox" },
+    { "Minecraft.Windows.exe", "Minecraft" },
+    { "Overwatch.exe", "Overwatch 2" },
+    { "RainbowSix.exe", "Rainbow Six Siege" },
+    { "RainbowSix_Vulkan.exe", "Rainbow Six Siege" },
+    { "TslGame.exe", "PUBG: BATTLEGROUNDS" },
+    { "RustClient.exe", "Rust" },
+    { "Terraria.exe", "Terraria" },
+    { "Among Us.exe", "Among Us" },
+    { "Cyberpunk2077.exe", "Cyberpunk 2077" },
+    { "witcher3.exe", "The Witcher 3: Wild Hunt" },
+    { "bg3.exe", "Baldur's Gate 3" },
+    { "bg3_dx11.exe", "Baldur's Gate 3" },
+    { "Warframe.x64.exe", "Warframe" },
+    { "destiny2.exe", "Destiny 2" },
+    { "RocketLeague.exe", "Rocket League" },
+    { "FallGuys_client_game.exe", "Fall Guys" },
+    { "DeadByDaylight-Win64-Shipping.exe", "Dead by Daylight" },
+    { "Phasmophobia.exe", "Phasmophobia" },
+    { "Lethal Company.exe", "Lethal Company" },
+    { "Palworld-Win64-Shipping.exe", "Palworld" },
+    { "helldivers2.exe", "HELLDIVERS 2" },
+    { "cod.exe", "Call of Duty" },
+    { "bf2042.exe", "Battlefield 2042" },
+    { "WorldOfTanks.exe", "World of Tanks" },
+    { "WorldOfWarships.exe", "World of Warships" },
+    { "Wow.exe", "World of Warcraft" },
+    { "Hearthstone.exe", "Hearthstone" },
+    { "Diablo IV.exe", "Diablo IV" },
+    { "PathOfExile_x64.exe", "Path of Exile" },
+    { "PathOfExileSteam.exe", "Path of Exile" },
+    { "PathOfExile.exe", "Path of Exile" },
+    { "GenshinImpact.exe", "Genshin Impact" },
+    { "StarRail.exe", "Honkai: Star Rail" },
+    { "ZenlessZoneZero.exe", "Zenless Zone Zero" },
+    { "osu!.exe", "osu!" },
+    { "Stardew Valley.exe", "Stardew Valley" },
+    { "valheim.exe", "Valheim" },
+    { "SonsOfTheForest.exe", "Sons Of The Forest" },
+    { "factorio.exe", "Factorio" },
+    { "tf_win64.exe", "Team Fortress 2" },
+    { "left4dead2.exe", "Left 4 Dead 2" },
+    { "gmod.exe", "Garry's Mod" },
+    { "DayZ_x64.exe", "DayZ" },
+    { "EscapeFromTarkov.exe", "Escape from Tarkov" },
+    { "LOSTARK.exe", "Lost Ark" },
+    { "Marvel-Win64-Shipping.exe", "Marvel Rivals" },
+    { "SoTGame.exe", "Sea of Thieves" },
+    { "HogwartsLegacy.exe", "Hogwarts Legacy" },
+    { "Starfield.exe", "Starfield" },
+    { "Fallout4.exe", "Fallout 4" },
+    { "SkyrimSE.exe", "The Elder Scrolls V: Skyrim" },
+    { "MonsterHunterWilds.exe", "Monster Hunter Wilds" },
+    { "MonsterHunterWorld.exe", "Monster Hunter: World" },
+    { "Brawlhalla.exe", "Brawlhalla" },
+    { "aces.exe", "War Thunder" },
+    { "arma3_x64.exe", "Arma 3" },
+    { "eurotrucks2.exe", "Euro Truck Simulator 2" },
+    { "ForzaHorizon5.exe", "Forza Horizon 5" },
+    { "hollow_knight.exe", "Hollow Knight" },
+    { "Hollow Knight.exe", "Hollow Knight" },
+    { "GeometryDash.exe", "Geometry Dash" },
+    { "dontstarve_steam_x64.exe", "Don't Starve Together" },
+    { "BlackDesert64.exe", "Black Desert" },
+    { "Raft.exe", "Raft" },
+    { "Subnautica.exe", "Subnautica" },
+    { "Celeste.exe", "Celeste" },
+    { "Cuphead.exe", "Cuphead" },
+    { "RimWorldWin64.exe", "RimWorld" },
+    { "Hades.exe", "Hades" },
+    { "Hades2.exe", "Hades II" },
+    { "TheForest.exe", "The Forest" },
+    { "Content Warning.exe", "Content Warning" },
+    { "REPO.exe", "R.E.P.O." },
+    { "PEAK.exe", "PEAK" },
+    { "deadlock.exe", "Deadlock" },
+    { "project8.exe", "Deadlock" },
+    { "MiSide.exe", "MiSide" },
+    { "Schedule I.exe", "Schedule I" }
+};
+static int game_on = -1;                        /* -1 — ещё не читали из хранилища */
+static int game_cur = -1;                       /* индекс в GAMES или -1 */
+static i64 game_since, game_next;
+static bool game_was_ready;
+bool game_activity_on(void) {
+    if (game_on < 0) {
+        char b[4];
+        game_on = !O.demo && !O.no_save && keyring_load("game", b, sizeof b) == 1 && b[0] == '1';
+    }
+    return game_on > 0;
+}
+const char *game_activity_name(void) { return game_activity_on() && game_cur >= 0 ? GAMES[game_cur].name : NULL; }
+static void game_presence(void) {
+    if (O.demo) return;
+    u8 st = presence_me();
+    if (ps_allowed()) { ps_send(st); ps_pend = 255; } else ps_pend = st;
+}
+void game_activity_set(bool on) {
+    game_activity_on();
+    game_on = on;
+    if (!O.demo && !O.no_save) { if (on) keyring_save("game", "1", 1); else keyring_delete("game"); }
+    game_next = 0;
+    if (!on && game_cur >= 0) { game_cur = -1; game_presence(); }
+    ui_dirty();
+}
+static bool ascii_ieq(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) {
+        char x = *a >= 'A' && *a <= 'Z' ? (char)(*a + 32) : *a, y = *b >= 'A' && *b <= 'Z' ? (char)(*b + 32) : *b;
+        if (x != y) return false;
+    }
+    return !*a && !*b;
+}
+static void game_cb(const char *exe, void *ud) {
+    int *found = ud;
+    if (*found >= 0) return;
+    for (int i = 0; i < (int)(sizeof GAMES / sizeof *GAMES); i++) if (ascii_ieq(exe, GAMES[i].exe)) { *found = i; return; }
+}
+static void game_tick(i64 now) {
+    if (!game_activity_on()) return;
+    if (S.ready && !game_was_ready && game_cur >= 0) game_presence();   /* новое подключение: IDENTIFY ушёл без игры */
+    game_was_ready = S.ready;
+    if (now < game_next) return;
+    game_next = now + GAME_SCAN_MS;
+    int found = -1;
+    if (plat_proc_names(game_cb, &found) < 0) return;
+    if (found >= 0 && game_cur >= 0 && !strcmp(GAMES[found].name, GAMES[game_cur].name)) return;   /* та же игра */
+    if (found == game_cur) return;
+    game_cur = found;
+    game_since = found >= 0 ? wall_ms() : 0;
+    game_presence();
+    ui_dirty();
+}
+static i64 game_next_wake(void) { return game_activity_on() ? (game_next ? game_next : now_ms()) : INT64_MAX; }
+
+static const char *game_activity_now(i64 *since) { *since = game_since; return game_activity_name(); }
 void presence_set(u8 st) {
     if (st != PS_ONLINE && st != PS_IDLE && st != PS_DND && st != PS_INVISIBLE) return;
     presence_me();
@@ -1715,6 +1907,7 @@ void store_tick(void) {
     }
     if (ring_ch && !ring_still_wanted(ring_ch)) ring_ch = 0;                         /* трубку положили — не звоним */
     if (ring_ch && now >= ring_at) { u64 ch = ring_ch; ring_ch = 0; ring_send(ch); }   /* CALL_CREATE не пришёл */
+    game_tick(now);
     if (ps_pend != 255 && ps_allowed()) { ps_send(ps_pend); ps_pend = 255; }
     if (!win_focused()) return;
     for (int i = 0; i < ACK_SLOTS; i++)
@@ -1731,6 +1924,7 @@ i64 store_next_wake(void) {
     { i64 f = status_next_wake(); if (f < t) t = f; }
     { i64 s = slow_next_wake(); if (s < t) t = s; }
     { i64 m = ml_next_wake(); if (m < t) t = m; }
+    { i64 g = game_next_wake(); if (g < t) t = g; }
     if (ps_pend != 255 && ps_sent[0] + 20000 < t) t = ps_sent[0] + 20000;   /* ревью 8 М1: минимум, не затирать */
     if (win_focused())
         for (int i = 0; i < ACK_SLOTS; i++) if (AK[i].pend && AK[i].at + ACK_GAP < t) t = AK[i].at + ACK_GAP;
@@ -1793,14 +1987,53 @@ bool rel_add_name(const char *username, char *err, size_t errn) {
 static Profile PF;
 static char *pf_s[4];                           /* name, username, pronouns, bio */
 static u64 *pf_roles, *pf_mut, *pf_fr;          /* №99: общие серверы и друзья */
+static char **pf_mut_nick;                      /* ники на общих серверах, параллельно pf_mut */
 static char *pf_conn[8];
 static bool pf_full;
 static unsigned pf_gen;
+/* ---------- разбор памяти модели (замеры, ничего не меняет) ---------- */
+#define MB_OVH 16u                              /* накладные расходы кучи на одно выделение (Windows LFH, x64) */
+static size_t mb_str(const char *s, int *na) { if (!s) return 0; (*na)++; return strlen(s) + 1 + MB_OVH; }
+void store_mem_breakdown(MemBreak *m) {
+    memset(m, 0, sizeof *m);
+    int na = 0;
+    m->guilds = (size_t)S.nguilds * sizeof(Guild) + (S.nguilds ? MB_OVH : 0);
+    for (int i = 0; i < S.nguilds; i++) {
+        const Guild *g = &S.guilds[i];
+        m->guilds += mb_str(g->name, &na);
+        if (g->nmy) { m->guilds += (size_t)g->nmy * sizeof(u64) + MB_OVH; na++; }
+        if (g->nroles) { m->roles += (size_t)g->nroles * sizeof(Role) + MB_OVH; na++; }
+        for (int k = 0; k < g->nroles; k++) m->roles += mb_str(g->roles[k].name, &na);
+        m->nroles += g->nroles;
+    }
+    m->chans = (size_t)S.capchans * sizeof(Channel) + MB_OVH;
+    m->nchans = S.nchans;
+    for (int i = 0; i < S.nchans; i++) {
+        const Channel *c = &S.chans[i];
+        m->chan_str += mb_str(c->name, &na) + mb_str(c->topic, &na);
+        if (c->nrecip) { m->chan_str += (size_t)c->nrecip * sizeof(u64) + MB_OVH; na++; }
+        if (c->now_) { m->ow += (size_t)c->now_ * sizeof(Overwrite) + MB_OVH; na++; m->now_ += c->now_; }
+    }
+    m->users = (size_t)S.capusers * sizeof(User) + MB_OVH;
+    m->nusers = S.nusers;
+    for (int i = 0; i < S.nusers; i++) m->user_str += mb_str(S.users[i].name, &na);
+    m->msgs = (size_t)S.capmsgs * sizeof(Message);
+    for (int i = 0; i < S.nmsgs; i++) {
+        const Message *ms = &S.msgs[i];
+        m->msgs += mb_str(ms->author, &na) + mb_str(ms->content, &na) + mb_str(ms->ref_author, &na) + mb_str(ms->ref_text, &na) + mb_str(ms->raw, &na);
+    }
+    m->rels = (size_t)S.caprels * sizeof(Relation) + MB_OVH;
+    for (int i = 0; i < S.nrels; i++) m->rels += mb_str(S.rels[i].act, &na);
+    m->nalloc = na;
+}
 const Profile *profile_state(void) { return &PF; }
 void profile_close(void) {
     for (int i = 0; i < 4; i++) { free(pf_s[i]); pf_s[i] = NULL; }
     free(pf_roles);
     pf_roles = NULL;
+    for (int i = 0; pf_mut_nick && i < PF.nmutual; i++) free(pf_mut_nick[i]);
+    free(pf_mut_nick);
+    pf_mut_nick = NULL;
     free(pf_mut); free(pf_fr);
     pf_mut = pf_fr = NULL;
     for (int i = 0; i < 8; i++) { free(pf_conn[i]); pf_conn[i] = NULL; }
@@ -1855,7 +2088,16 @@ void profile_apply(const cJSON *j) {
         if (nm > 100) nm = 100;
         if (nf > 100) nf = 100;
         const cJSON *x;
-        if (nm > 0) { pf_mut = xcalloc((size_t)nm, sizeof(u64)); cJSON_ArrayForEach(x, jget(j, "mutual_guilds")) { if (PF.nmutual >= nm) break; if (jid(x, "id")) pf_mut[PF.nmutual++] = jid(x, "id"); } }
+        if (nm > 0) {
+            pf_mut = xcalloc((size_t)nm, sizeof(u64));
+            pf_mut_nick = xcalloc((size_t)nm, sizeof(char *));
+            cJSON_ArrayForEach(x, jget(j, "mutual_guilds")) {
+                if (PF.nmutual >= nm) break;
+                if (!jid(x, "id")) continue;
+                pf_mut_nick[PF.nmutual] = pf_str(jstr(x, "nick"), false, 40);   /* ник на том сервере, если задан */
+                pf_mut[PF.nmutual++] = jid(x, "id");
+            }
+        }
         if (nf > 0) {
             pf_fr = xcalloc((size_t)nf, sizeof(u64));
             cJSON_ArrayForEach(x, jget(j, "mutual_friends")) {
@@ -1876,6 +2118,7 @@ void profile_apply(const cJSON *j) {
             if (pf_conn[PF.nconn]) { PF.conn[PF.nconn] = pf_conn[PF.nconn]; PF.nconn++; }
         }
         PF.mutual = pf_mut;
+        PF.mutual_nick = (const char *const *)pf_mut_nick;
         PF.friends = pf_fr;
     }
     ui_dirty();
@@ -1889,7 +2132,8 @@ static void on_profile(Resp *r, void *ctx) {
     json_done();
 }
 static void profile_req(u64 uid, u64 guild_id, bool full);
-void profile_open(u64 uid, u64 guild_id) { profile_req(uid, guild_id, false); }
+/* Общие серверы и друзья — сразу, тем же единственным запросом (так открывает профиль и официальный клиент). */
+void profile_open(u64 uid, u64 guild_id) { profile_req(uid, guild_id, true); }
 void profile_open_full(u64 uid, u64 guild_id) { profile_req(uid, guild_id, true); }
 static void profile_req(u64 uid, u64 guild_id, bool full) {
     profile_close();
@@ -2395,7 +2639,7 @@ const char *guild_description(u64 gid) {
     http_async("GET", path, NULL, on_guild_desc, (void *)(uintptr_t)gid);
     return NULL;
 }
-static struct { u64 gid; bool loaded, busy; RoleName *r; int n; } RL;
+static struct { u64 gid; bool loaded, busy, drop; RoleName *r; int n; } RL;   /* drop: карточку закрыли, пока шёл запрос */
 static void roles_free(void) {
     for (int i = 0; i < RL.n; i++) free(RL.r[i].name);
     free(RL.r);
@@ -2422,6 +2666,7 @@ static void roles_fill(const cJSON *arr) {
 static void on_roles(Resp *r, void *ctx) {
     if ((u64)(uintptr_t)ctx != RL.gid) return;
     RL.busy = false;
+    if (RL.drop) { RL.drop = false; RL.gid = 0; RL.loaded = false; return; }   /* уже не нужны */
     if (r->status == 200) { cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len); roles_fill(j); json_done(); }
     else RL.loaded = true;                      /* пусто: ошибка — ui покажет «ролей нет» */
     ui_dirty();
@@ -2429,10 +2674,10 @@ static void on_roles(Resp *r, void *ctx) {
 int guild_roles(u64 gid, const RoleName **out) {
     if (out) *out = RL.r;
     if (RL.gid == gid && RL.loaded) return RL.n;
-    if (RL.gid == gid && RL.busy) return -1;
+    if (RL.gid == gid && RL.busy) { RL.drop = false; return -1; }
     roles_free();
     RL.gid = gid;
-    RL.loaded = false;
+    RL.loaded = RL.drop = false;
     if (O.demo) {
         static const char R[] = "[{\"id\":\"2000\",\"name\":\"@everyone\",\"position\":0},{\"id\":\"2001\",\"name\":\"Админ\",\"color\":15548997,\"position\":3},"
                                 "{\"id\":\"2002\",\"name\":\"Модератор\",\"color\":3447003,\"position\":1},{\"id\":\"2003\",\"name\":\"Участник\",\"color\":5763719,\"position\":2}]";
@@ -2451,10 +2696,17 @@ int guild_roles(u64 gid, const RoleName **out) {
 /* Ревью 6 М3: закрыли формы — кэши ролей, описания и настроек канала не держим. */
 void forms_closed(void) {
     roles_free();
-    RL.gid = 0; RL.loaded = RL.busy = false;
+    RL.gid = 0; RL.loaded = RL.busy = RL.drop = false;
     free(GD.desc); GD.desc = NULL; GD.gid = 0; GD.loaded = GD.busy = false;
     free(CI.name); free(CI.topic); CI.name = CI.topic = NULL;
     CI.cid = 0; CI.loaded = CI.busy = false; CI.failed = 0;
+}
+/* Карточка профиля закрыта: роли её сервера не держим (окно «Права» само зовёт forms_closed). */
+void roles_release(u64 gid) {
+    if (!gid || RL.gid != gid) return;
+    if (RL.busy) { RL.drop = true; return; }    /* ответ ещё в пути: выбросить его по приходу */
+    roles_free();
+    RL.gid = 0; RL.loaded = false;
 }
 const char *role_name(u64 gid, u64 rid) {
     if (RL.gid != gid) return NULL;
@@ -2750,6 +3002,7 @@ bool invite_parse(const char *text, char *code, size_t n) {
 }
 static InviteState IV;
 static bool iv_risk_ack;
+static u64 iv_goto;                             /* вступили: открыть этот сервер, когда придёт GUILD_CREATE */
 static i64 iv_last_join;
 static u64 iv_channel_id;                       /* канал приглашения — для X-Context-Properties */
 static int iv_channel_type;
@@ -2829,10 +3082,11 @@ void invite_open(const char *code_or_url) {
 static void on_join(Resp *r, void *ctx) {
     if ((unsigned)(uintptr_t)ctx != iv_gen) return;
     IV.busy = false;
-    if (r->status == 200) { IV.joined = true; ui_notice("вы вступили на сервер \"%s\"", iv_gname); }
-    else if ((r->status == 400 && r->body.p && strstr(r->body.p, "captcha")) || r->status == 403) {
-        IV.need_browser = true;                     /* капча или отказ: вступить через браузер */
-        snprintf(IV.error, sizeof IV.error, ui_tr("Discord требует вступить через браузер"));
+    if (r->status == 200) { IV.joined = true; iv_goto = IV.guild_id; ui_notice("вы вступили на сервер \"%s\"", iv_gname); }
+    else if (r->status == 400 && r->body.p && strstr(r->body.p, "captcha")) {
+        /* проверка не пройдена (нет WebView2, отмена, трижды не принята): запасной путь — браузер */
+        IV.need_browser = true;
+        snprintf(IV.error, sizeof IV.error, ui_tr("проверка Discord не пройдена - попробуйте ещё раз или вступите через браузер"));
     }
     else {
         /* причина от Discord (code + message): 403 бывает и «нужна подтверждённая почта/телефон», и «вас не пускают» */
@@ -2854,9 +3108,21 @@ static void on_join(Resp *r, void *ctx) {
  * разовое предупреждение о риске (частые вступления из стороннего клиента Discord может наказать). */
 const char *invite_risk_text(void) {
     return ui_tr("Вступление из стороннего клиента: Discord может попросить капчу или отказать, а частые вступления - "
-           "ограничить аккаунт. Если Discord попросит проверку, Astra DS предложит вступить через браузер.");
+           "ограничить аккаунт. Если Discord попросит проверку, она откроется в окне Astra DS. Предупреждение больше не появится.");
 }
-void invite_risk_ack(void) { iv_risk_ack = true; IV.risk_warning = false; ui_dirty(); }
+/* согласие с предупреждением — один раз навсегда (запись хранилища "invite-risk-ok"), дальше вступление в одно нажатие */
+void invite_risk_ack(void) {
+    iv_risk_ack = true;
+    IV.risk_warning = false;
+    if (!O.demo && !O.no_save) keyring_save("invite-risk-ok", "1", 1);
+    ui_dirty();
+}
+u64 invite_take_goto(void) {
+    if (!iv_goto || !guild_find(iv_goto)) return 0;
+    u64 g = iv_goto;
+    iv_goto = 0;
+    return g;
+}
 bool invite_open_browser(void) {
     if (!invite_code_ok(IV.code, strlen(IV.code))) return false;
     char url[64];
@@ -2868,6 +3134,7 @@ bool invite_open_browser(void) {
 }
 void invite_join(void) {
     if (!IV.code[0] || !IV.guild_id || IV.busy || IV.joined || IV.error[0]) return;
+    if (!iv_risk_ack && !O.demo && !O.no_save) { char b[4]; if (keyring_load("invite-risk-ok", b, sizeof b) == 1 && b[0] == '1') iv_risk_ack = true; }
     if (!iv_risk_ack) { IV.risk_warning = true; ui_dirty(); return; }   /* сначала — разовое предупреждение */
     i64 now = now_ms();
     if (iv_last_join && now - iv_last_join < INVITE_GAP_MS) {
@@ -2895,6 +3162,7 @@ void invite_join(void) {
         json_done();
         buf_free(&g);
         IV.joined = true;
+        iv_goto = IV.guild_id;
         ui_notice("вы вступили на сервер \"%s\" (демо)", iv_gname);
         return;
     }
@@ -4859,9 +5127,8 @@ void threads_open(u64 gid) {
         buf_free(&r.body);
         return;
     }
-    char path[64];
-    snprintf(path, sizeof path, "/guilds/%llu/threads/active", (unsigned long long)gid);
-    http_async("GET", path, NULL, on_threads, (void *)(uintptr_t)gid);
+    /* Активные ветки приходят событием THREAD_LIST_SYNC: подписка op 14 с "threads":true (gw_subscribe, как у
+     * официального клиента). REST /guilds/{id}/threads/active Discord отдаёт только ботам — пользователю 403. */
 }
 int chan_threads(u64 parent, const Channel **out, int max) {
     int n = 0;
@@ -5734,7 +6001,9 @@ static const Sch S_CO[] = { {"channel_id", NULL}, {"muted", NULL}, {"message_not
 static const Sch S_UGSE[] = { {"guild_id", NULL}, {"muted", NULL}, {"message_notifications", NULL}, {"channel_overrides", S_CO}, END };
 static const Sch S_UGS[] = { {"entries", S_UGSE}, {"guild_id", NULL}, {"muted", NULL}, {"channel_overrides", S_CO}, END };
 static const Sch S_REL[] = { {"id", NULL}, {"type", NULL}, {"user_id", NULL}, {"user", S_USER}, END };
-static const Sch S_PRES[] = { {"user_id", NULL}, {"status", NULL}, {"user", S_USER}, END };
+static const Sch S_ACTTS[] = { {"start", NULL}, END };
+static const Sch S_ACT[] = { {"name", NULL}, {"type", NULL}, {"timestamps", S_ACTTS}, END };   /* «Активно сейчас» */
+static const Sch S_PRES[] = { {"user_id", NULL}, {"status", NULL}, {"user", S_USER}, {"activities", S_ACT}, END };
 static const Sch S_MPRES[] = { {"friends", S_PRES}, END };      /* guilds (присутствия серверов) — не нужны */
 static const Sch S_PROTO_HOOK[] = { END };   /* значение не копируется: папки разбираются сразу (folders_slim) */
 static const Sch S_USET[] = { {"guild_folders", NULL}, END };

@@ -23,7 +23,12 @@ typedef uint8_t u8;
 #define DISCORD_EPOCH_MS 1420070400000LL
 
 /* ======================= util.c ======================= */
-typedef struct { char *p; size_t len, cap; } Buf;
+/* pg_ok — владелец разрешил крупный блок (от BUF_PG_MIN) брать страницами прямо у системы, мимо кучи (ответы REST,
+ * пакеты шлюза): освобождённое сразу уходит системе, в куче не остаётся «дыр». pg — блок сейчас страничный.
+ * Такой буфер освобождается только buf_free/buf_wipe (не free(b.p)). */
+typedef struct { char *p; size_t len, cap; bool pg_ok, pg; } Buf;
+#define BUF_PG_MIN (32u << 10)
+extern bool g_pg_off;                           /* замеры (--livetest MC_NOPG=1): крупные блоки — из кучи, как раньше */
 void buf_put(Buf *b, const void *s, size_t n);
 void buf_puts(Buf *b, const char *s);
 void buf_printf(Buf *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
@@ -82,6 +87,34 @@ bool cred_load(void);                            /* из системного х
 bool cred_save(void);
 void cred_delete(void);
 bool read_hidden(const char *prompt);            /* скрытый ввод токена в консоли */
+/* Несколько аккаунтов (secret.c). Токен каждого — отдельная запись хранилища "acct:<id>", список (id и имя) —
+ * запись "accounts"; "token" — как раньше, активный аккаунт. Токены неактивных в памяти не держатся: читаются
+ * только при переключении, сразу в защищённую область. --no-save и --demo хранилище не трогают. */
+#define ACC_MAX 5
+typedef struct { u64 id; char name[64]; } AcctInfo;
+int acct_list(AcctInfo *out, int max);           /* сохранённые аккаунты, по порядку добавления */
+bool acct_save_current(u64 uid, const char *name);   /* текущий токен -> "acct:<uid>" и в список (имя обновляется) */
+bool acct_load(u64 uid);                         /* токен аккаунта -> защищённая область; false — нет / битый (текущий не тронут) */
+void acct_delete(u64 uid);                       /* убрать из хранилища и списка */
+void acct_wipe_all(void);                        /* --logout, паника: все аккаунты и список */
+/* main.c: переключить на сохранённый аккаунт / начать вход ещё одного (прежний остаётся сохранённым).
+ * Выполняется в главном цикле (не из обработчика ввода). */
+void app_trim_soon(void);                        /* main.c: сжать кучу через несколько секунд покоя */
+void app_trim_in(int ms, bool ram);             /* main.c: сжать кучу через ms (выгрузка памяти), ram — и рабочий набор */
+extern void (*g_gw_spy)(const char *json);      /* selftest: перехват отправки в шлюз */
+bool http_release_idle(void);                   /* net.c: закрыть простаивающие соединения REST (false — что-то идёт) */
+bool http_active(void);                         /* net.c: идёт запрос, отправка файла или капча */
+extern bool g_test_inactive;                    /* selftest: окно «не активно» (выгрузка памяти) */
+void ui_test_mem_unload(int lvl, int idle_min);  /* selftest: уровень при смене сервера (0..2) и минуты неактивности */
+void ui_shot_perf(void);                        /* --shot-keys perf: «Настройки -> Производительность» */
+void ui_test_select_guild(int idx);             /* selftest: выбрать сервер (0 — главная, i+1 — S.guilds[i]) */
+void app_trim_after_call(void);                  /* то же после звонка + убрать из оперативной памяти страницы звука Windows */
+void app_account_switch(u64 uid);
+void app_account_add(void);
+bool app_account_adding(void);                   /* идёт вход дополнительного аккаунта: на экране входа есть «Назад» */
+void app_account_add_cancel(void);               /* «Назад»: вернуться к прежнему аккаунту */
+void ui_login_cancel(void);                      /* ui.c: закрыть окно входа без входа */
+void ui_account_switched(void);                  /* ui.c: аккаунт сменился — сбросить выбор сервера, канала, окна */
 
 /* ======================= store.c ======================= */
 enum { CH_TEXT = 0, CH_DM = 1, CH_VOICE = 2, CH_GROUP = 3, CH_CATEGORY = 4, CH_NEWS = 5, CH_STAGE = 13,
@@ -160,7 +193,7 @@ typedef struct {
 /* Друзья: хранится только id + тип + статус (16 байт на запись), имя и аватар — user_name()/user_avatar(). */
 enum { REL_FRIEND = 1, REL_BLOCKED = 2, REL_IN = 3, REL_OUT = 4 };   /* друг, заблокирован, входящая, исходящая заявка */
 enum { PS_OFFLINE, PS_ONLINE, PS_IDLE, PS_DND };                     /* статус — только у друзей (REL_FRIEND) */
-typedef struct { u64 id; u8 type, status; } Relation;
+typedef struct { u64 id; u8 type, status; u8 act_type; char *act; i64 act_start; } Relation;   /* act — игра/музыка друга (NULL — нет), act_start — unix-мс начала (0 — неизвестно) */
 
 /* Поиск сообщений: одна страница (<= 25), живёт до search_close(). */
 #define SEARCH_PAGE 25
@@ -193,6 +226,10 @@ typedef struct {
     bool detached;                              /* загружено не до самых новых: плашка «Вернуться к настоящему» */
 } Store;
 extern Store S;
+/* «Производительность»: сколько байт занимает модель по видам (оценка: размеры структур и строк + 16 Б на выделение). */
+typedef struct { size_t guilds, roles, chans, chan_str, ow, users, user_str, msgs, rels; int nchans, now_, nusers, nroles, nalloc; } MemBreak;
+void store_mem_breakdown(MemBreak *m);
+size_t ml_mem_bytes(void);                      /* memlist.c: строки списка участников */
 
 void store_reset(void);
 void store_ready(const cJSON *d);
@@ -310,6 +347,7 @@ void ack_all(void);
 void mark_unread(u64 channel_id, u64 msg_id);   /* непрочитанным начиная с msg_id */
 void store_tick(void);                          /* main.c: отложенные отметки и смена статуса */
 i64 store_next_wake(void);
+bool win_active(void);                          /* окно в фокусе, не свёрнуто и не в трее (выгрузка памяти; без окна — true) */
 bool win_focused(void);                         /* окно активно (gui_win.c; без окна — true) */
 /* Карточка профиля: только по щелчку, без кэша; строки живут до profile_close. */
 typedef struct {
@@ -323,6 +361,7 @@ typedef struct {
     /* №99 полный профиль (profile_open_full): общие серверы и друзья, привязанные аккаунты */
     bool full;
     int nmutual; const u64 *mutual;             /* id общих серверов */
+    const char *const *mutual_nick;             /* ник на каждом из общих серверов (NULL — нет), параллельно mutual */
     int nfriends; const u64 *friends;           /* id общих друзей (имена — user_name) */
     int nconn; const char *conn[8];             /* «тип: имя» привязанных аккаунтов */
 } Profile;
@@ -333,6 +372,9 @@ void profile_close(void);
 /* Свой статус: op 3 не чаще 5 раз за 20 с (лишнее откладывается, побеждает последнее). */
 enum { PS_INVISIBLE = 4 };
 void presence_set(u8 st);
+bool game_activity_on(void);                     /* «Показывать, во что я играю» (Конфиденциальность) */
+void game_activity_set(bool on);
+const char *game_activity_name(void);            /* игра сейчас или NULL */
 u8 presence_me(void);
 /* Меню человека */
 void rel_block(u64 uid);                        /* PUT relationships {"type":2} */
@@ -472,7 +514,7 @@ bool msg_alert(const Message *m);
  * Хранятся активные ветки открытого сервера (threads_open при входе на сервер) и те, где я участник. */
 enum { TF_JOINED = 1, TF_ARCHIVED = 2, TF_LOCKED = 4, TF_DELETED = 8 };   /* TF_DELETED: открытую ветку удалили — ввод закрыт */
 bool chan_is_thread(const Channel *c);
-void threads_open(u64 gid);                     /* GET /guilds/{id}/threads/active; ветки других серверов (не мои) — убрать */
+void threads_open(u64 gid);                     /* ветки сервера: принимать его THREAD_LIST_SYNC (op 14 threads:true); ветки других серверов (не мои) — убрать */
 int chan_threads(u64 parent, const Channel **out, int max);   /* ветки под каналом, свежие сверху */
 bool thread_create(u64 cid, u64 mid, const char *name, char *err, size_t errn);   /* mid 0 — без сообщения */
 bool thread_member(u64 tid, bool join, char *err, size_t errn);   /* вступить / выйти */
@@ -666,6 +708,7 @@ const char *guild_description(u64 gid);         /* первый вызов — G
 typedef struct { u64 id; char *name; u32 color; int pos; } RoleName;
 int guild_roles(u64 gid, const RoleName **out);
 const char *role_name(u64 gid, u64 role_id);    /* из загруженного списка; NULL — нет */
+void roles_release(u64 gid);                    /* закрыта карточка профиля: освободить роли gid (если загружены для него) */
 enum { CHK_TEXT = 0, CHK_VOICE = 2, CHK_CATEGORY = 4 };
 bool chan_create(u64 gid, int kind, const char *name, u64 parent_id, char *err, size_t errn);
 typedef struct { const char *name, *topic; int slowmode, nsfw, bitrate, user_limit; } ChanEdit;   /* NULL / -1 — не менять */
@@ -695,7 +738,8 @@ typedef struct {
 } InviteState;
 #define INVITE_GAP_MS 30000                     /* пауза между вступлениями */
 const char *invite_risk_text(void);             /* текст разового предупреждения */
-void invite_risk_ack(void);                     /* пользователь согласился (до выхода из программы) */
+void invite_risk_ack(void);                     /* пользователь согласился (запоминается в хранилище) */
+u64 invite_take_goto(void);                     /* вступили и сервер пришёл: его id (один раз), иначе 0 */
 bool invite_open_browser(void);                 /* открыть https://discord.gg/КОД в браузере (только проверенный код) */
 bool open_url_browser(const char *url);         /* gui_win.c / main.c: системный браузер; только https://discord.gg/ и discord.com/invite/ */
 void invite_open(const char *code_or_url);      /* GET /invites/{code}?with_counts=true */

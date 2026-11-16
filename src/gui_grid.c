@@ -321,6 +321,7 @@ static void csi(char f) {
 #ifdef ASTRA_VIDEO
                     gvid_commit();              /* кадр вывода окончен: прямоугольник видео этого render() */
 #endif
+                    gpic_commit();              /* и картинки просмотра */
                     gb_flush();
                 }
             }
@@ -657,7 +658,66 @@ void gui_shutdown(void) {
     kq_wipe();
     gb_flush();
 }
+/* ---------- картинка просмотра растром поверх клеток ----------
+ * ui.c в render() заявляет область (клетки) и пиксели img_full (term_picture); в конце кадра (ESC[?2026l) заявка
+ * фиксируется: не заявили в этом кадре — картинки нет. Пиксели принадлежат img.c и живут, пока заявлены: img.c
+ * освобождает их только в начале кадра без заявки (значит, здесь уже снято) или через gpic_forget. Рисует бэкенд
+ * поверх строк (gpic_get), в том же буфере полосы — без мигания. */
+static struct { bool pend; int p[4]; const u32 *ppx; int ppw, pph; u32 pbg; int c[4]; const u32 *px; int pw, ph; u32 bg; } GP;
+bool gb_pic_ok(void) __attribute__((weak));
+bool gb_pic_ok(void) { return false; }
+void gb_cell_size(int *cw, int *ch) __attribute__((weak));
+void gb_cell_size(int *cw, int *ch) { *cw = 8; *ch = 16; }
+bool term_picture_ok(void) { return G.ch && G.ui && gb_pic_ok(); }
+void gb_cursor(int kind) __attribute__((weak));
+void gb_cursor(int kind) { (void)kind; }
+void term_cursor(int kind) { gb_cursor(kind); }
+void term_cells_px(int w, int h, int *pw, int *ph) {
+    int cw = 8, ch = 16;
+    gb_cell_size(&cw, &ch);
+    *pw = w * cw;
+    *ph = h * ch;
+}
+bool term_picture(int x, int y, int w, int h, const u32 *px, int pw, int ph, u32 bg) {
+    if (!term_picture_ok() || !px || pw < 1 || ph < 1) return false;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > G.cols) w = G.cols - x;
+    if (y + h > G.rows) h = G.rows - y;
+    if (w <= 0 || h <= 0) return false;
+    GP.pend = true;
+    GP.p[0] = x; GP.p[1] = y; GP.p[2] = w; GP.p[3] = h;
+    GP.ppx = px; GP.ppw = pw; GP.pph = ph; GP.pbg = bg;
+    return true;
+}
+static void gp_mark(const int *r) {
+    for (int y = r[1]; y < r[1] + r[3] && y < G.rows; y++) if (y >= 0 && G.dirty) G.dirty[y] = 1;
+}
+void gpic_frame_begin(void) { GP.pend = false; }
+void gpic_commit(void) {
+    int nc[4] = { 0, 0, 0, 0 };
+    const u32 *npx = NULL;
+    int nw = 0, nh = 0;
+    u32 nbg = 0;
+    if (GP.pend) { memcpy(nc, GP.p, sizeof nc); npx = GP.ppx; nw = GP.ppw; nh = GP.pph; nbg = GP.pbg; }
+    if (!memcmp(nc, GP.c, sizeof nc) && npx == GP.px && nw == GP.pw && nh == GP.ph && nbg == GP.bg) return;
+    if (GP.c[2] > 0) gp_mark(GP.c);              /* прежняя область — перерисовать (клетки под ней снова видны) */
+    memcpy(GP.c, nc, sizeof nc);
+    GP.px = npx; GP.pw = nw; GP.ph = nh; GP.bg = nbg;
+    if (GP.c[2] > 0) gp_mark(GP.c);
+}
+void gpic_forget(void) {
+    if (GP.c[2] > 0) gp_mark(GP.c);
+    memset(&GP, 0, sizeof GP);
+}
+bool gpic_get(GpPic *o) {
+    if (!GP.px || GP.c[2] <= 0 || GP.c[3] <= 0) return false;
+    *o = (GpPic){ GP.c[0], GP.c[1], GP.c[2], GP.c[3], GP.px, GP.pw, GP.ph, GP.bg };
+    return true;
+}
+
 void gui_size(int *w, int *h) {
+    gpic_frame_begin();                         /* render() начинается с term_size: картинка пока не заявлена */
 #ifdef ASTRA_VIDEO
     gvid_frame_begin();                         /* render() начинается с term_size: новый кадр — видео пока не заявлено */
 #endif
@@ -810,16 +870,26 @@ static void gv_scale(const u8 *y, const u8 *u, const u8 *v, int ys, int uvs, int
     u8 *ty = row, *tu = row + fw + 16, *tv = row + 2 * fw + 32;
     u32 sy = sy_step / 2;
     int prev_uv = -1;
+    /* уменьшение больше чем в 1,25 раза: яркость — среднее 2 x 2 соседних точек, а не одна точка. Ближайший сосед
+     * выбрасывал строки и столбцы, и мелкий текст чужого экрана рвался; 2 x 2 — сглаживание почти даром
+     * (~1 мс на кадр 720p против 21 мс у HALFTONE в GDI), без лишней памяти. Цвет (U, V) и так вдвое реже. */
+    bool avg = sx_step > 0x14000 || sy_step > 0x14000;
     for (int dy = 0; dy < fh; dy++, sy += sy_step) {
         int yy = (int)(sy >> 16);
         const u8 *Yr = y + (size_t)yy * ys, *Ur = u + (size_t)(yy >> 1) * uvs, *Vr = v + (size_t)(yy >> 1) * uvs;
+        const u8 *Y2 = yy + 1 < h ? Yr + ys : Yr;
         u32 *o = buf + (size_t)dy * fw;
         if (bits == 8) {
-            for (int dx = 0; dx < fw; dx++) ty[dx] = Yr[xi[dx]];
+            if (avg) for (int dx = 0; dx < fw; dx++) { int a = xi[dx], b = a + 1 < w ? a + 1 : a; ty[dx] = (u8)((Yr[a] + Yr[b] + Y2[a] + Y2[b] + 2) >> 2); }
+            else for (int dx = 0; dx < fw; dx++) ty[dx] = Yr[xi[dx]];
             if ((yy >> 1) != prev_uv) { prev_uv = yy >> 1; for (int dx = 0; dx < fw; dx++) { tu[dx] = Ur[xi[dx] >> 1]; tv[dx] = Vr[xi[dx] >> 1]; } }
         } else {                                 /* 10 бит: u16 -> u8 */
-            const uint16_t *Y16 = (const uint16_t *)Yr, *U16 = (const uint16_t *)Ur, *V16 = (const uint16_t *)Vr;
-            for (int dx = 0; dx < fw; dx++) { ty[dx] = (u8)(Y16[xi[dx]] >> 2); tu[dx] = (u8)(U16[xi[dx] >> 1] >> 2); tv[dx] = (u8)(V16[xi[dx] >> 1] >> 2); }
+            const uint16_t *Y16 = (const uint16_t *)Yr, *Y16b = (const uint16_t *)Y2, *U16 = (const uint16_t *)Ur, *V16 = (const uint16_t *)Vr;
+            for (int dx = 0; dx < fw; dx++) {
+                int a = xi[dx], b = a + 1 < w ? a + 1 : a;
+                ty[dx] = (u8)(avg ? (Y16[a] + Y16[b] + Y16b[a] + Y16b[b] + 8) >> 4 : Y16[a] >> 2);
+                tu[dx] = (u8)(U16[a >> 1] >> 2); tv[dx] = (u8)(V16[a >> 1] >> 2);
+            }
         }
         int dx = 0;
 #if defined(__SSE2__)

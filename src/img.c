@@ -133,7 +133,10 @@ static void j_progress(j_common_ptr c) {
  * близки. */
 /* Consolas, доля закраски 2 x 4 частей символа (слева направо, сверху вниз), 0..255;
  * снято со шрифта на 96 пт (обвязка gen_cov.py, Pillow). */
-static const u8 GLYPH_COV[95][8] = {
+static bool s_pixel;                            /* окно восстанавливает пиксели (gui_win.c): ровным клеткам — без текстуры */
+void img_set_pixel(bool on) { s_pixel = on; }
+#define GLYPH_COV img_glyph_cov                 /* открыта: окно восстанавливает по ней пиксели мелкой сетки (gui_win.c) */
+const u8 img_glyph_cov[95][8] = {
     {   0,   0,   0,   0,   0,   0,   0,   0 }, /* ' ' */
     {  32,  35,  37,  42,  31,  34,   1,   1 }, /* '!' */
     {  68,  66,  13,  12,   0,   0,   0,   0 }, /* '"' */
@@ -333,7 +336,7 @@ static void cell_make(const Acc *q[8], ImgCell *c) {
         if (y > ymax) ymax = y;
         for (int k = 0; k < 3; k++) m[k] += p[i][k] / 8;
     }
-    if (ymax - ymin < UNIFORM_T) {
+    if (ymax - ymin < UNIFORM_T && !s_pixel) {   /* окно рисует пиксели: текстура рампы дала бы полосы — точный подбор */
         int k = lum((int)m[0], (int)m[1], (int)m[2]) * 10 / 256;
         double cov = glyph_mean(RAMP[k] - 0x20);
         c->ch = RAMP[k];
@@ -630,7 +633,9 @@ static bool take(Ent *e, ImgCell *out) {
 void img_enable(bool on) { if (!on) img_forget(); s_on = on; }
 /* Начало кадра: всё, что не запросили в прошлом кадре, ушло с экрана — затереть и забыть; готовые
  * аватары — оставить в пределах AV_KEEP_BYTES (самые давние — вон). */
+static void fi_frame(void);
 void img_frame(void) {
+    fi_frame();                                 /* просмотр закрыт — картинку затереть */
     if (s_frames)
         for (int i = 0; i < NENT; i++)
             if (s_e[i].state != ST_FREE && s_e[i].gen != s_gen && !(s_e[i].state == ST_READY && s_e[i].kind == K_AV)) ent_free(&s_e[i]);
@@ -866,6 +871,10 @@ static struct {
     bool over;
 } D;
 
+/* Буфер загрузки: от 32 КБ (превью вложений) — страницами мимо кучи, сразу назад системе; вид блока — по его размеру. */
+static bool dl_pg(size_t c) { return c >= BUF_PG_MIN && !g_pg_off; }
+static u8 *dl_alloc(size_t c) { return dl_pg(c) ? plat_pages(c) : malloc(c); }
+static void dl_release(u8 *b, size_t c) { if (!b) return; wipe(b, c); if (dl_pg(c)) plat_pages_free(b, c); else free(b); }
 static size_t dl_write(char *p, size_t sz, size_t n, void *ud) {
     (void)ud;
     size_t t = sz * n;
@@ -874,10 +883,10 @@ static size_t dl_write(char *p, size_t sz, size_t n, void *ud) {
         size_t c = D.cap ? D.cap : 4096;
         while (c < D.len + t) c *= 2;
         if (c > DL_MAX) c = DL_MAX;
-        u8 *nb = malloc(c);
+        u8 *nb = dl_alloc(c);
         if (!nb) return 0;
         if (D.len) memcpy(nb, D.buf, D.len);
-        if (D.buf) { wipe(D.buf, D.cap); free(D.buf); }
+        dl_release(D.buf, D.cap);
         D.buf = nb;
         D.cap = c;
     }
@@ -887,7 +896,7 @@ static size_t dl_write(char *p, size_t sz, size_t n, void *ud) {
 }
 
 static void dl_drop_buf(void) {
-    if (D.buf) { wipe(D.buf, D.cap); free(D.buf); }
+    dl_release(D.buf, D.cap);
     D.buf = NULL;
     D.len = D.cap = 0;
     D.over = false;
@@ -921,6 +930,7 @@ static void dl_fail(Ent *e, i64 retry_ms) {
     fail_add(e->key, now_ms() + retry_ms);      /* и после возврата на экран — не раньше срока */
 }
 
+static bool fi_busy(void);                      /* идёт загрузка картинки просмотра (тот же multi) */
 static void dl_start(void) {
     Ent *best = NULL;
     bool waiting = false;
@@ -931,7 +941,7 @@ static void dl_start(void) {
         if (eligible(e, now) && (!best || e->seen_at < best->seen_at)) best = e;   /* дольше всех видна */
     }
     if (!best) {                                /* очередь пуста: соединение и multi не держим */
-        if (!waiting && D.m) { curl_multi_cleanup(D.m); D.m = NULL; }
+        if (!waiting && D.m && !fi_busy()) { curl_multi_cleanup(D.m); D.m = NULL; }
         return;
     }
     const char *proxy = route();
@@ -988,23 +998,280 @@ static void dl_finish(CURLcode rc) {
     dl_fail(e, status == 0 ? 30000 : 600000);
 }
 
+/* ======================= просмотр: картинка настоящими пикселями =======================
+ * Одна картинка (та, что открыта в просмотре) — в разрешении окна, 0x00RRGGBB. Заказ — у медиапрокси под
+ * ящик окна (format=jpeg&width&height: прокси вписывает с пропорциями и не увеличивает), та же очередь curl и
+ * тот же маршрут (VLESS), только медиапрокси. Живёт, пока просмотр открыт: кадр без запроса — затирание и free.
+ * Смена размера окна: после FULL_SETTLE_MS покоя — заказ под новый ящик, до прихода виден прежний (подмена —
+ * внутри кадра, в img_full: окно в это время не рисует). */
+#define FULL_DL_MAX (8u << 20)                  /* ответ прокси: JPEG под окно обычно 0,2-1,5 МБ */
+#define FULL_MAX_DIM 4096
+#define FULL_SRC_MAX 8192                       /* разбираемый JPEG — не больше по стороне */
+#define FULL_JMEM (48u << 20)                   /* libjpeg на разбор: прогрессивный 2560x1440 ~ 11 МБ коэффициентов */
+#define FULL_SETTLE_MS 300
+void gpic_forget(void) __attribute__((weak));   /* окно (gui_grid.c): забыть указатель на картинку */
+void gpic_forget(void) {}
+static struct {
+    u64 key, pkey;                              /* заказанная картинка (путь вложения) и показываемая */
+    int state;                                  /* ST_FREE / ST_WANT / ST_LOAD / ST_READY / ST_FAIL — последнего заказа */
+    int rw, rh;                                 /* ящик последнего заказа */
+    int bw, bh;                                 /* ящик последнего запроса и когда он сменился */
+    i64 box_at;
+    bool pend;                                  /* нужен перезаказ под новый ящик — ждём покоя */
+    u32 gen;
+    char *url;
+    CURL *e;
+    u8 *buf; size_t len, cap; bool over;
+    u32 *px; int pw, ph;                        /* показываемая */
+    u32 *nx; int nw, nh;                        /* пришла под новый ящик — подменит в img_full */
+} FI;
+static size_t px_bytes(int w, int h) { return (size_t)w * (size_t)h * 4; }
+/* Большие буферы просмотра — прямо у системы (plat_pages), мимо кучи: после закрытия память возвращается
+ * целиком, куча не «раздувается» мегабайтами, которые потом не отдать. */
+static void *fi_alloc(size_t n) { return n ? plat_pages(n) : NULL; }
+static void fi_release(void *p, size_t n) { if (p) { wipe(p, n); plat_pages_free(p, n); } }
+static void fi_free_px(u32 **p, int *w, int *h) {
+    fi_release(*p, px_bytes(*w, *h));
+    *p = NULL; *w = *h = 0;
+}
+static void fi_dl_end(void) {
+    if (FI.e) { if (D.m) curl_multi_remove_handle(D.m, FI.e); curl_easy_cleanup(FI.e); FI.e = NULL; }
+    fi_release(FI.buf, FI.cap);
+    FI.buf = NULL; FI.len = FI.cap = 0; FI.over = false;
+}
+static void fi_reset(void) {
+    if (FI.px || FI.nx) gpic_forget();          /* окно не должно держать указатель на освобождаемое */
+    fi_dl_end();
+    free(FI.url);
+    fi_free_px(&FI.px, &FI.pw, &FI.ph);
+    fi_free_px(&FI.nx, &FI.nw, &FI.nh);
+    memset(&FI, 0, sizeof FI);
+}
+static bool fi_busy(void) { return FI.e != NULL; }
+/* Выгрузка памяти (смена сервера, неактивность): аватары вне экрана — сразу, не ждать вытеснения по AV_KEEP_BYTES.
+ * Видимое в этом кадре не трогаем: вернутся на экран — скачаются заново. */
+void img_drop_cache(void) {
+    for (Ent *k; (k = kept_lru()) != NULL;) ent_free(k);
+}
+void img_full_drop(void) { if (FI.state != ST_FREE || FI.px || FI.nx) fi_reset(); }   /* просмотр закрыт: сразу (окно забывает указатель первым) */
+static void fi_frame(void) { if ((FI.state != ST_FREE || FI.px || FI.nx) && FI.gen != s_gen) fi_reset(); }
+size_t img_full_bytes(void) { return px_bytes(FI.pw, FI.ph) + px_bytes(FI.nw, FI.nh) + FI.cap; }
+static size_t fi_write(char *p, size_t sz, size_t n, void *ud) {
+    (void)ud;
+    size_t t = sz * n;
+    if (FI.len + t > FULL_DL_MAX) { FI.over = true; return 0; }
+    if (FI.len + t > FI.cap) {
+        size_t c = FI.cap ? FI.cap : (64u << 10);
+        while (c < FI.len + t) c *= 2;
+        if (c > FULL_DL_MAX) c = FULL_DL_MAX;
+        u8 *nb = fi_alloc(c);
+        if (!nb) return 0;
+        if (FI.len) memcpy(nb, FI.buf, FI.len);
+        fi_release(FI.buf, FI.cap);
+        FI.buf = nb;
+        FI.cap = c;
+    }
+    memcpy(FI.buf + FI.len, p, t);
+    FI.len += t;
+    return t;
+}
+/* JPEG -> 0x00RRGGBB, DCT-масштабированием вписан в bw x bh (без увеличения). Любая ошибка — longjmp. */
+typedef struct { struct jpeg_decompress_struct ci; JErr je; struct jpeg_progress_mgr pg; bool created; u8 *row; size_t rown; u32 *px; size_t pxn; } FDec;
+static bool fi_body(FDec *d, const u8 *jpg, size_t n, int bw, int bh, int *ow, int *oh) {
+    struct jpeg_decompress_struct *ci = &d->ci;
+    jpeg_create_decompress(ci);
+    d->created = true;
+    ci->progress = &d->pg;
+    ci->mem->max_memory_to_use = FULL_JMEM;
+    jpeg_mem_src(ci, jpg, (unsigned long)n);
+    if (jpeg_read_header(ci, TRUE) != JPEG_HEADER_OK) return false;
+    unsigned W = ci->image_width, H = ci->image_height;
+    if (!W || !H || W > FULL_SRC_MAX || H > FULL_SRC_MAX || ci->data_precision != 8) return false;
+    if (!((ci->num_components == 1 && ci->jpeg_color_space == JCS_GRAYSCALE) ||
+          (ci->num_components == 3 && (ci->jpeg_color_space == JCS_YCbCr || ci->jpeg_color_space == JCS_RGB))))
+        return false;
+    ci->out_color_space = JCS_RGB;
+    ci->dct_method = JDCT_ISLOW;
+    ci->do_fancy_upsampling = TRUE;
+    ci->quantize_colors = FALSE;
+    ci->buffered_image = FALSE;
+    unsigned M = 8;                             /* наибольшее M/8, при котором картинка помещается в ящик */
+    while (M > 1 && ((W * M + 7) / 8 > (unsigned)bw || (H * M + 7) / 8 > (unsigned)bh)) M--;
+    ci->scale_num = M;
+    ci->scale_denom = 8;
+    if (!jpeg_start_decompress(ci)) return false;
+    unsigned OW = ci->output_width, OH = ci->output_height;
+    if (!OW || !OH || OW > FULL_SRC_MAX || OH > FULL_SRC_MAX || ci->output_components != 3) return false;
+    d->rown = (size_t)OW * 3;
+    d->row = malloc(d->rown);
+    d->pxn = px_bytes((int)OW, (int)OH);
+    d->px = fi_alloc(d->pxn);
+    if (!d->row || !d->px) return false;
+    while (ci->output_scanline < OH) {
+        JSAMPROW rp = d->row;
+        if (jpeg_read_scanlines(ci, &rp, 1) != 1) return false;
+        u32 *o = d->px + (size_t)(ci->output_scanline - 1) * OW;
+        for (unsigned x = 0; x < OW; x++) o[x] = (u32)d->row[3 * x] << 16 | (u32)d->row[3 * x + 1] << 8 | d->row[3 * x + 2];
+    }
+    jpeg_finish_decompress(ci);
+    *ow = (int)OW; *oh = (int)OH;
+    return true;
+}
+static u32 *fi_decode(const u8 *jpg, size_t n, int bw, int bh, int *ow, int *oh) {
+    if (!jpg || n < 4 || jpg[0] != 0xFF || jpg[1] != 0xD8 || jpg[2] != 0xFF) return NULL;
+    FDec *d = calloc(1, sizeof *d);
+    if (!d) return NULL;
+    d->ci.err = jpeg_std_error(&d->je.pub);
+    d->je.pub.error_exit = j_exit;
+    d->je.pub.output_message = j_output;
+    d->je.pub.emit_message = j_emit;
+    d->pg.progress_monitor = j_progress;
+    img_jpeg_thread_limit(FULL_JMEM);           /* свой предел на этот разбор (общий 1 МБ — для превью) */
+    volatile bool ok = false;
+    if (!setjmp(d->je.jb)) ok = fi_body(d, jpg, n, bw, bh, ow, oh);
+    if (d->created) jpeg_destroy_decompress(&d->ci);
+    img_jpeg_thread_limit(0);
+    if (d->row) { wipe(d->row, d->rown); free(d->row); }
+    u32 *px = d->px;
+    if (!ok && px) { fi_release(px, d->pxn); px = NULL; }
+    wipe(d, sizeof *d);
+    free(d);
+    return px;
+}
+/* --demo: картинка без сети — градиент, круги и сетка тонких линий (видно, что это пиксели, а не символы) */
+static u32 *fi_demo(int bw, int bh, int *ow, int *oh) {
+    int w = bw, h = bw * 9 / 16;
+    if (h > bh) { h = bh; w = bh * 16 / 9; }
+    if (w < 16 || h < 16) return NULL;
+    u32 *px = fi_alloc(px_bytes(w, h));
+    if (!px) return NULL;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            int r = x * 255 / w, g = y * 255 / h, b = 160;
+            int cx = w / 3, cy = h / 2, R = h / 4, dx = x - cx, dy = y - cy;
+            if (dx * dx + dy * dy < R * R) { r = 250; g = 200; b = 60; }
+            int cx2 = w * 2 / 3, dx2 = x - cx2;
+            if (dx2 * dx2 + dy * dy < R * R / 2) { r = 40; g = 40; b = 50; }
+            if ((x % 24 == 0) || (y % 24 == 0)) { r = r / 2; g = g / 2; b = b / 2; }
+            px[(size_t)y * w + x] = (u32)r << 16 | (u32)g << 8 | (u32)b;
+        }
+    *ow = w; *oh = h;
+    return px;
+}
+static void fi_take(u32 *p, int w, int h) {    /* новая готова: показать (идёт кадр) */
+    fi_free_px(&FI.px, &FI.pw, &FI.ph);
+    FI.px = p; FI.pw = w; FI.ph = h;
+    FI.pkey = FI.key;
+}
+const uint32_t *img_full(const char *url, int bw, int bh, int *pw, int *ph) {
+    if ((!s_on && !O.demo) || !url || !*url || !pw || !ph || bw < 16 || bh < 16) return NULL;
+    if (bw > FULL_MAX_DIM) bw = FULL_MAX_DIM;
+    if (bh > FULL_MAX_DIM) bh = FULL_MAX_DIM;
+    char u[800];
+    u64 key;
+    if (!att_url(url, bw, bh, u, sizeof u, &key)) {
+        if (!O.demo) return NULL;
+        key = fnv(FNV0, url, strlen(url));
+        u[0] = 0;
+    }
+    i64 now = now_ms();
+    if (FI.key != key) fi_reset();              /* другая картинка */
+    FI.key = key;
+    FI.gen = s_gen;
+    if (bw != FI.bw || bh != FI.bh) { FI.bw = bw; FI.bh = bh; FI.box_at = now; }
+    if (FI.nx) {                                /* пришла под новый ящик: подменить (идёт кадр — окно не рисует) */
+        u32 *p = FI.nx;
+        int w = FI.nw, h = FI.nh;
+        FI.nx = NULL; FI.nw = FI.nh = 0;
+        fi_take(p, w, h);
+    }
+    bool need = false;
+    if (!FI.px) need = FI.state == ST_FREE;
+    else if (FI.state != ST_WANT && FI.state != ST_LOAD && FI.state != ST_FAIL && (bw != FI.rw || bh != FI.rh)) {
+        bool too_big = FI.pw > bw || FI.ph > bh;                   /* окно уменьшили: не помещается */
+        bool limited = FI.pw >= FI.rw - 2 || FI.ph >= FI.rh - 2;   /* упиралась в прежний ящик: в большем — чётче */
+        need = too_big || (limited && (bw > FI.rw || bh > FI.rh));
+    }
+    FI.pend = need && FI.px && now - FI.box_at < FULL_SETTLE_MS;
+    if (need && !FI.pend) {
+        FI.rw = bw; FI.rh = bh;
+        if (O.demo) {
+            int w, h;
+            u32 *p = fi_demo(bw, bh, &w, &h);
+            if (p) { fi_take(p, w, h); FI.state = ST_READY; } else FI.state = ST_FAIL;
+        } else {
+            free(FI.url);
+            FI.url = xstrdup(u);
+            FI.state = ST_WANT;
+        }
+    }
+    if (!FI.px) return NULL;
+    *pw = FI.pw; *ph = FI.ph;
+    return FI.px;
+}
+static void fi_start(void) {
+    if (FI.state != ST_WANT || FI.e || !FI.url) return;
+    const char *proxy = route();
+    if (!proxy) return;
+    if (strncmp(FI.url, "https://media.discordapp.net/", 29)) { FI.state = ST_FAIL; return; }   /* только медиапрокси */
+    if (!D.m) D.m = curl_multi_init();
+    FI.e = D.m ? curl_easy_init() : NULL;
+    if (!FI.e) { FI.state = ST_FAIL; return; }
+    static struct curl_slist acc = { "Accept: image/jpeg", NULL };
+    net_curl_common(FI.e);
+    curl_easy_setopt(FI.e, CURLOPT_PROTOCOLS_STR, "https");
+    curl_easy_setopt(FI.e, CURLOPT_PROXY, proxy);
+    curl_easy_setopt(FI.e, CURLOPT_NOPROXY, "");
+    if (proxy[0]) curl_easy_setopt(FI.e, CURLOPT_SOCKS5_AUTH, (long)CURLAUTH_BASIC);
+    curl_easy_setopt(FI.e, CURLOPT_URL, FI.url);
+    curl_easy_setopt(FI.e, CURLOPT_HTTPHEADER, &acc);
+    curl_easy_setopt(FI.e, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(FI.e, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(FI.e, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)FULL_DL_MAX);
+    curl_easy_setopt(FI.e, CURLOPT_WRITEFUNCTION, fi_write);
+    curl_easy_setopt(FI.e, CURLOPT_WRITEDATA, NULL);
+    if (curl_multi_add_handle(D.m, FI.e) != CURLM_OK) { curl_easy_cleanup(FI.e); FI.e = NULL; FI.state = ST_FAIL; return; }
+    FI.state = ST_LOAD;
+}
+static void fi_finish(CURLcode rc) {
+    long status = 0;
+    if (rc == CURLE_OK) curl_easy_getinfo(FI.e, CURLINFO_RESPONSE_CODE, &status);
+    u32 *p = NULL;
+    int w = 0, h = 0;
+    if (status == 200 && !FI.over && FI.len >= 4) p = fi_decode(FI.buf, FI.len, FI.rw, FI.rh, &w, &h);
+    fi_dl_end();                                /* затирает скачанные байты */
+    free(FI.url);
+    FI.url = NULL;
+    if (!p) { FI.state = ST_FAIL; ui_dirty(); return; }
+    if (FI.px) { fi_free_px(&FI.nx, &FI.nw, &FI.nh); FI.nx = p; FI.nw = w; FI.nh = h; }   /* прежнюю окно может рисовать */
+    else { FI.px = p; FI.pw = w; FI.ph = h; FI.pkey = FI.key; }
+    FI.state = ST_READY;
+    ui_dirty();
+}
+
 void img_service(void) {
     if (!s_on) return;
+    if (FI.pend && now_ms() - FI.box_at >= FULL_SETTLE_MS) { FI.pend = false; ui_dirty(); }   /* покой после смены размера: перезаказ в кадре */
     if (!D.e) dl_start();
-    if (!D.e) return;
+    fi_start();
+    if (!D.e && !FI.e) return;
     int running = 0;
     curl_multi_perform(D.m, &running);
     CURLMsg *m;
     int left;
-    while ((m = curl_multi_info_read(D.m, &left)))
-        if (m->msg == CURLMSG_DONE && m->easy_handle == D.e) { dl_finish(m->data.result); break; }
+    while ((m = curl_multi_info_read(D.m, &left))) {
+        if (m->msg != CURLMSG_DONE) continue;
+        if (D.e && m->easy_handle == D.e) dl_finish(m->data.result);
+        else if (FI.e && m->easy_handle == FI.e) fi_finish(m->data.result);
+    }
 }
 
 int img_waitables(Waitable *out, int max) { (void)out; (void)max; return 0; }
 
 i64 img_next_wake(void) {
     if (!s_on) return INT64_MAX;
-    if (D.e) return now_ms() + 15;              /* опрос только пока идёт загрузка */
+    if (D.e || FI.e) return now_ms() + 15;      /* опрос только пока идёт загрузка */
+    if (FI.pend) return FI.box_at + FULL_SETTLE_MS;
     if (!route()) return INT64_MAX;             /* ждём VLESS (он разбудит цикл) */
     i64 t = INT64_MAX;
     for (int i = 0; i < NENT; i++)              /* ближайший конец паузы видимой картинки */
@@ -1015,6 +1282,7 @@ i64 img_next_wake(void) {
 }
 
 void img_forget(void) {
+    fi_reset();
     dl_end();
     if (D.m) { curl_multi_cleanup(D.m); D.m = NULL; }
     for (int i = 0; i < NENT; i++) if (s_e[i].state != ST_FREE) ent_free(&s_e[i]);

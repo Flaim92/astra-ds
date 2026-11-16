@@ -446,7 +446,24 @@ direct:;
 /* Один оборот главного цикла: отрисовать, ждать событий (без опроса: объекты, сокеты, очередь
  * окна — до ближайшего таймера, но не дольше deadline), обработать. */
 static void relogin_step(void);
+/* Сжатие кучи «потом»: после тяжёлого (READY, смена канала, закрытие просмотра картинки, смена аккаунта) — через
+ * TRIM_DELAY_MS покоя, одним вызовом. В звонке — нет: HeapCompact держит кучу, поток звука трещал бы. */
+#define TRIM_DELAY_MS 3000
+static i64 g_trim_at;
+static bool g_trim_ram;                          /* после звонка: ещё и рабочий набор */
+void app_trim_soon(void) { g_trim_at = now_ms() + TRIM_DELAY_MS; }
+/* Выгрузка памяти (ui.c): сжать кучу через ms (0 — в ближайший оборот), ram — ещё и рабочий набор. */
+void app_trim_in(int ms, bool ram) { g_trim_at = now_ms() + (ms > 0 ? ms : 1); if (ram) g_trim_ram = true; }
+void app_trim_after_call(void) { g_trim_ram = true; g_trim_at = now_ms() + TRIM_DELAY_MS; }
+static void trim_step(void) {
+    if (!g_trim_at || now_ms() < g_trim_at) return;
+    if (g_audio_busy) { g_trim_at = now_ms() + 60000; return; }   /* после звонка voice.c сожмёт сама */
+    g_trim_at = 0;
+    plat_trim();
+    if (g_trim_ram) { g_trim_ram = false; plat_trim_ram(); }   /* один раз после звонка, не в простое по кругу */
+}
 static void loop_once(i64 deadline) {
+    trim_step();
     ui_render_if_dirty();
     Waitable w[12];                             /* последнее место — под g_wake */
     int n = O.cli ? cli_waitables(w, 4) : term_waitables(w, 4);
@@ -467,6 +484,7 @@ static void loop_once(i64 deadline) {
     if (lg < t) t = lg;
     i64 st = store_next_wake();                 /* отложенные отметки о прочтении и смена статуса */
     if (st < t) t = st;
+    if (g_trim_at && g_trim_at < t) t = g_trim_at;
     if (deadline < t) t = deadline;
     int timeout = t == INT64_MAX ? -1 : (t <= now ? 0 : (int)(t - now > 60000 ? 60000 : t - now));
     plat_wait(w, n, timeout);
@@ -494,7 +512,7 @@ static bool relog_on;
 static void relogin_start(void) {
     gw_stop();
     voice_leave();
-    if (!O.no_save && !O.demo) cred_delete();   /* в демо (проверка) хранилище не трогаем */
+    if (!O.no_save && !O.demo) { acct_delete(S.me_id); cred_delete(); }   /* в демо (проверка) хранилище не трогаем; отозванный токен — и из списка аккаунтов */
     secret_set("", 0);                          /* затереть токен в закреплённой памяти */
     store_reset();
     g_auth_failed = false;
@@ -503,14 +521,78 @@ static void relogin_start(void) {
     ui_notice(ui_tr("Сессия завершена Discord - войдите заново"));
     relog_on = true;
 }
+/* ---- несколько аккаунтов: переключение и вход ещё одного ----
+ * Просьбы ui.c (щелчок) выполняются здесь, в главном цикле, тем же путём, что повторный вход: остановить шлюз и
+ * голос, сбросить модель, взять другой токен, снова шлюз. Токен другого аккаунта читается из хранилища только сейчас. */
+static u64 acc_switch_to;                        /* просьба переключиться */
+static bool acc_add_req;                         /* просьба войти ещё в один аккаунт */
+static bool acc_adding;                          /* идёт вход дополнительного аккаунта */
+static u64 acc_prev;                             /* к какому аккаунту вернуться по «Назад» */
+void app_account_switch(u64 uid) { if (uid && uid != S.me_id) acc_switch_to = uid; }
+void app_account_add(void) { acc_add_req = true; }
+bool app_account_adding(void) { return acc_adding; }
+void app_account_add_cancel(void) {
+    if (!acc_adding) return;
+    acc_switch_to = acc_prev;                     /* окно входа закроется, relogin_step вернёт прежний */
+}
+static void session_stop(void) {
+    voice_leave();
+    gw_stop();
+    img_forget();                                 /* картинки прежнего аккаунта — затереть */
+    store_reset();
+}
+static void account_do_switch(u64 uid) {
+    acc_switch_to = 0;
+    if (O.demo) { ui_notice(ui_tr("демо: переключение аккаунта (без сети)")); ui_dirty(); return; }
+    session_stop();
+    if (!acct_load(uid)) {                       /* записи нет или битая: прежний токен ещё в защищённой области */
+        ui_notice(ui_tr("аккаунт не найден в хранилище - войдите в него заново"));
+        if (secret_token()) gw_start();
+        ui_dirty();
+        return;
+    }
+    if (!O.no_save) cred_save();                 /* он теперь активный: следующий запуск откроет его */
+    app_trim_soon();                             /* модель прежнего аккаунта освобождена */
+    gw_start();
+    ui_account_switched();
+    ui_dirty();
+}
+static void account_step(void) {
+    if (acc_add_req && !relog_on && !O.cli) {    /* вход ещё одного: как повторный вход, но прежний токен остаётся в "acct:" */
+        acc_add_req = false;
+        if (!O.demo) acct_save_current(S.me_id, S.me_name);   /* текущий точно в списке */
+        acc_prev = S.me_id;
+        if (!O.demo) session_stop();
+        secret_set("", 0);
+        if (!login_init()) { g_quit = true; return; }
+        acc_adding = true;
+        ui_login_begin(false);
+        relog_on = true;
+        return;
+    }
+    if (acc_switch_to && !relog_on) account_do_switch(acc_switch_to);
+}
 static void relogin_step(void) {
     if (g_auth_failed && !O.cli && !relog_on && (!O.demo || getenv("MC_TEST_RELOGIN"))) relogin_start();
+    account_step();
+    if (acc_adding && acc_switch_to && ui_login_active()) ui_login_cancel();   /* «Назад» на экране входа */
     if (!relog_on || ui_login_active()) return;
     relog_on = false;
     login_finish();
+    bool adding = acc_adding;
+    acc_adding = false;
+    if (adding && acc_switch_to) {               /* вход отменён: вернуть прежний аккаунт */
+        u64 to = acc_switch_to;
+        acc_switch_to = 0;
+        if (O.demo) { demo_load(); ui_on_ready(); return; }
+        if (acct_load(to)) { cred_save(); gw_start(); ui_account_switched(); ui_dirty(); return; }
+        g_quit = true;
+        return;
+    }
     if (O.demo) { demo_load(); ui_on_ready(); return; }   /* проверка: вход в демо «удался» */
     if (!secret_token()) { g_quit = true; return; }        /* окно входа закрыто — выход */
     gw_start();
+    if (adding) ui_account_switched();
     ui_dirty();
 }
 
@@ -526,10 +608,11 @@ static void relogin_step(void) {
  *   size:ШxВ              — размер сетки в клетках (по умолчанию 110x34)
  *   wait:МС               — прокрутить цикл событий МС миллисекунд (таймеры интерфейса)
  *   snap                  — промежуточный снимок ФАЙЛ-1.bmp, ФАЙЛ-2.bmp, ...
+ *   perf                  — открыть «Настройки -> Производительность» (замеры памяти; разрешено и без --demo)
  *   fine:X:Y:Ш:В          — тестовый слой мелкой сетки (K=4, градиент и ASCII) в клетках X,Y,ШxВ
  * Итоговый снимок — в ФАЙЛ после всех шагов. Файл пишется только по этому явному флагу.
  * Без --demo (живой аккаунт, токен только из хранилища) — только просмотр: разрешены wait, size, snap,
- * fine, hover, wheelup/wheeldown, up/down/left/right/home/end/pgup/pgdn/tab/btab/esc/enter/f1;
+ * fine, hover, wheelup/wheeldown, up/down/left/right/home/end/pgup/pgdn/tab/btab/esc/enter/f1, perf;
  * набор текста, сочетания, щелчки и прочие клавиши (голос F2..F12, удаление) отклоняются. */
 static int exit_rc;
 static bool shot_text;                          /* --shot-text: рядом со снимком .txt — текст сетки (стенд тестировщика) */
@@ -613,7 +696,7 @@ static void shot_fine(int x, int y, int w, int h) {
 /* Живой аккаунт: только шаги просмотра. */
 static bool shot_safe(const char *t) {
     static const char *const ok[] = { "up", "down", "left", "right", "home", "end", "pgup", "pgdn", "tab", "btab",
-                                      "esc", "enter", "f1", "snap" };
+                                      "esc", "enter", "f1", "snap", "perf" };   /* perf — «Производительность» (просмотр) */
     for (size_t i = 0; i < sizeof ok / sizeof *ok; i++) if (!strcmp(t, ok[i])) return true;
     static const char *const pre[] = { "wait:", "size:", "fine:", "hover:", "wheelup:", "wheeldown:" };
     for (size_t i = 0; i < sizeof pre / sizeof *pre; i++) if (!strncmp(t, pre[i], strlen(pre[i]))) return true;
@@ -634,6 +717,7 @@ static bool shot_step(const char *t, const char *path, int *snaps) {
         shot_spin(0);
         return true;
     }
+    if (!strcmp(t, "perf")) { ui_shot_perf(); shot_spin(50); return true; }   /* замеры: открыть «Настройки -> Производительность» */
     if (!strcmp(t, "snap")) {
         char p[512];
         const char *dot = strrchr(path, '.');
@@ -773,6 +857,7 @@ static int shot_run(const char *path, const char *keys) {
 
 int main(int argc, char **argv) {
     plat_harden(on_crash);
+    plat_mem_tune();
     /* Нулевое логирование: всё, что любая библиотека попытается написать в stderr, пропадает. */
 #ifdef _WIN32
     if (!freopen("NUL", "w", stderr)) return 1;
@@ -908,10 +993,14 @@ int main(int argc, char **argv) {
     if (!O.demo && !O.logout && !single_instance()) { term_puts(ui_tr("Astra DS уже запущен: открыто его окно\n")); return 1; }
     if (!secret_init()) { term_puts(ui_tr("не удалось выделить защищённую память\n")); return 1; }
     if (O.logout) {
+        acct_wipe_all();                         /* все сохранённые аккаунты */
         cred_delete();
         vless_forget();
         keyring_delete("startup");               /* «больше не спрашивать» — тоже */
         keyring_delete("voice");                 /* настройки голоса */
+        keyring_delete("game");                  /* «показывать игру» */
+        keyring_delete("invite-risk-ok");        /* согласие с предупреждением о вступлении */
+        keyring_delete("active-now");            /* «Активно сейчас» */
         keyring_delete("update-checked");        /* дата проверки обновлений (АО-5) */
         keyring_delete("upd_told");              /* разовое уведомление об автопроверке */
         secret_destroy();

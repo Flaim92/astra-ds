@@ -97,7 +97,7 @@ static const char READY[] =
     "{\"id\":\"1007\",\"type\":3,\"user\":{\"id\":\"1007\",\"username\":\"neznakomec\",\"global_name\":\"Незнакомец\"}},"
     "{\"id\":\"1008\",\"type\":4,\"user_id\":\"1008\"},{\"id\":\"1009\",\"type\":2,\"user_id\":\"1009\"},"
     "{\"id\":\"1003\",\"type\":5,\"user_id\":\"1003\"}],"
-    "\"merged_presences\":{\"friends\":[{\"user_id\":\"1001\",\"status\":\"online\"},{\"user_id\":\"1002\",\"status\":\"idle\"},"
+    "\"merged_presences\":{\"friends\":[{\"user_id\":\"1001\",\"status\":\"online\",\"activities\":[{\"type\":0,\"name\":\"Minecraft\"}]},{\"user_id\":\"1002\",\"status\":\"idle\",\"activities\":[{\"type\":2,\"name\":\"Spotify\"}]},"
     "{\"user_id\":\"1004\",\"status\":\"dnd\"},{\"user_id\":\"1006\",\"status\":\"online\"},{\"user_id\":\"1009\",\"status\":\"online\"}],\"guilds\":[]},"
     "\"guilds\":[{\"id\":\"2000\",\"properties\":{\"name\":\"Уютный уголок\",\"owner_id\":\"1001\",\"icon\":\"0123456789abcdef0123456789abcdef\"},"
     "\"roles\":[{\"id\":\"2000\",\"permissions\":\"274881170497\"},{\"id\":\"2001\",\"name\":\"Админ\",\"hoist\":true,\"permissions\":\"8\",\"color\":15548997,\"position\":3},"
@@ -391,7 +391,8 @@ void demo_profile(u64 uid, u64 guild_id) {
     else buf_puts(&b, "},\"user_profile\":{}");
     if (guild_id) buf_printf(&b, ",\"guild_member\":{\"nick\":null,\"roles\":[\"2001\"],\"joined_at\":\"2021-03-04T05:06:07+00:00\"}");
     /* №99: общие серверы/друзья и привязки (используются только в полном профиле) */
-    buf_puts(&b, ",\"mutual_guilds\":[{\"id\":\"2000\"}],\"mutual_friends\":[{\"id\":\"1002\",\"username\":\"bob\",\"global_name\":\"Боб\"}],"
+    buf_puts(&b, ",\"mutual_guilds\":[{\"id\":\"2000\"},{\"id\":\"2500\",\"nick\":\"Ферзь\"},{\"id\":\"2700\",\"nick\":null}],"
+                 "\"mutual_friends\":[{\"id\":\"1002\",\"username\":\"bob\",\"global_name\":\"Боб\"},{\"id\":\"1004\",\"username\":\"filin\",\"global_name\":\"Ночной Филин\"},{\"id\":\"1005\",\"username\":\"mira\",\"global_name\":\"Мира\"}],"
                  "\"connected_accounts\":[{\"type\":\"github\",\"name\":\"alice-dev\"}]");
     buf_puts(&b, "}");
     cJSON *j = json_parse(b.p, b.len);

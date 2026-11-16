@@ -31,6 +31,10 @@ if [ "$OS" = win ]; then
     DEFS="$DEFS -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -DUNICODE -D_UNICODE"
     LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,--gc-sections -Wl,--dynamicbase -Wl,--nxcompat -Wl,--high-entropy-va -s"
     SYSLIBS="-lws2_32 -lcrypt32 -lsecur32 -lbcrypt -ladvapi32 -lole32 -loleaut32 -luuid -lavrt -lwer -lwinmm -liphlpapi -lksuser -luser32 -lgdi32 -ldwmapi -lshell32 -lshlwapi -lwintrust"
+    # Отложенная загрузка редко нужных DLL (трей, ссылки, перетаскивание файла, проверка подписи обновления, звонок,
+    # окно капчи): грузятся при первом вызове, а не при запуске. SHELL32 сам тянет Windows.Storage, shcore, ole32,
+    # combase и др. — в простое это ~0,3 МБ частной памяти и несколько МБ рабочего набора. DELAY=0 — как раньше.
+    DELAY_DLLS="shell32 shlwapi ole32 oleaut32 wintrust avrt iphlpapi ksuser winmm"
     INC="$INC -isystem third_party/webview2"   # WebView2.h (капча при входе, src/captcha.c): официальный заголовок, без -Werror
     EXE=$OUT/astra-ds.exe
 elif [ "$OS" = mac ]; then
@@ -124,6 +128,23 @@ else
 fi
 
 [ "${1:-}" = check ] && { echo "== объекты собраны"; exit 0; }
+
+# Windows: библиотеки отложенной загрузки. Список функций — из обычной библиотеки импорта MinGW (lib<dll>.a,
+# символы __imp_*): так видны и функции, которые новая Windows переадресует в другие DLL (ole32 -> combase).
+if [ "$OS" = win ] && [ "${DELAY:-1}" = 1 ] && command -v dlltool > /dev/null; then
+    mkdir -p "$OUT/obj/delay"
+    for d in $DELAY_DLLS; do
+        lib="$OUT/obj/delay/lib${d}_delay.a"
+        if [ ! -f "$lib" ]; then
+            imp=$($CC -print-file-name=lib$d.a)
+            [ -f "$imp" ] || { echo "lib$d.a: нет — без отложенной загрузки"; continue; }
+            { echo "LIBRARY $d.dll"; echo "EXPORTS"; nm "$imp" 2>/dev/null | sed -n 's/.* I __imp_\(.*\)$/\1/p' | sort -u; } > "$OUT/obj/delay/$d.def"
+            dlltool --input-def "$OUT/obj/delay/$d.def" --dllname "$d.dll" --output-delaylib "$lib" 2> /dev/null || { rm -f "$lib"; continue; }
+        fi
+        SYSLIBS=$(echo " $SYSLIBS " | sed "s| -l$d | -l${d}_delay |")
+    done
+    SYSLIBS="-L$OUT/obj/delay $SYSLIBS -ldelayimp"
+fi
 
 # Video: декодеры просмотра трансляций — FFmpeg libavcodec (h264/hevc/vp8/vp9) и dav1d (AV1), deps/build-deps.sh
 VIDLIBS=""

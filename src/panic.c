@@ -158,11 +158,16 @@ void panic_now(void) {
     if (!O.cli) term_shutdown();                 /* вернуть терминал из сырого режима */
     screen_wipe();
     vless_stop();                                /* погасить Xray, затереть ключ */
+    acct_wipe_all();                             /* токены всех сохранённых аккаунтов */
     cred_delete();                               /* токен из системного хранилища */
     vless_forget();                              /* ссылку VLESS из хранилища */
     keyring_delete("startup");                  /* выбор стартового экрана (под новым и старым именем) */
     voice_settings_forget();                    /* настройки голоса: не дописать заново при выходе */
     keyring_delete("update-checked");           /* дата проверки обновлений (АО-5) */
+    keyring_delete("game");                     /* «показывать игру» */
+    keyring_delete("invite-risk-ok");           /* согласие с предупреждением о вступлении */
+    keyring_delete("active-now");               /* «Активно сейчас» */
+    keyring_delete("mem-unload");               /* выгрузка памяти: уровни */
     keyring_delete("upd_told");                 /* разовое уведомление об автопроверке */
 #ifdef _WIN32
     TerminateProcess(GetCurrentProcess(), 0);

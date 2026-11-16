@@ -10,6 +10,7 @@
 #include <avrt.h>
 #include <process.h>
 #include <psapi.h>
+#include <tlhelp32.h>
 #include <malloc.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -96,7 +97,25 @@ void plat_lock(void *p, size_t n) {
 }
 void plat_unlock(void *p, size_t n) { WerUnregisterExcludedMemoryBlock(p); VirtualUnlock(p, n); }
 void plat_wipe(void *p, size_t n) { if (p && n) SecureZeroMemory(p, n); }
-void plat_trim(void) { _heapmin(); }
+void plat_trim(void) { _heapmin(); HeapCompact(GetProcessHeap(), 0); }
+/* HeapOptimizeResources (Windows 8.1+): куча раньше возвращает свободные страницы системе — меньше «раздувания»
+ * после разбора READY и картинок. В заголовках MinGW может не быть — объявлено здесь. */
+void plat_trim_ram(void) { SetProcessWorkingSetSizeEx(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1, 0); }
+void plat_mem_tune(void) {
+    struct { DWORD Version, Flags; } hi = { 1, 0 };
+    HeapSetInformation(GetProcessHeap(), (HEAP_INFORMATION_CLASS)3, &hi, sizeof hi);
+}
+void plat_heap_stats(size_t *used, size_t *free_commit) {
+    *used = *free_commit = 0;
+    HANDLE h = GetProcessHeap();
+    if (!HeapLock(h)) return;
+    PROCESS_HEAP_ENTRY e = { 0 };
+    while (HeapWalk(h, &e)) {
+        if (e.wFlags & PROCESS_HEAP_ENTRY_BUSY) *used += e.cbData + e.cbOverhead;
+        else if (!(e.wFlags & (PROCESS_HEAP_REGION | PROCESS_HEAP_UNCOMMITTED_RANGE))) *free_commit += e.cbData;
+    }
+    HeapUnlock(h);
+}
 int64_t plat_cpu_ms(void) {
     FILETIME c, e, k, u;
     if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) return 0;
@@ -341,6 +360,20 @@ int keyring_load_raw(const char *entry, bool old, char *out, size_t cap) { retur
 
 const char *keyring_name(void) { return "Диспетчер учётных данных Windows"; }
 
+/* Список процессов: только имена exe (снимок ToolHelp, без открытия процессов и чтения их памяти). */
+int plat_proc_names(void (*cb)(const char *exe, void *ud), void *ud) {
+    HANDLE sn = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (sn == INVALID_HANDLE_VALUE) return -1;
+    PROCESSENTRY32W pe = { .dwSize = sizeof pe };
+    int n = 0;
+    for (BOOL ok = Process32FirstW(sn, &pe); ok; ok = Process32NextW(sn, &pe)) {
+        char nm[MAX_PATH * 3];
+        if (WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, nm, sizeof nm, NULL, NULL) > 0) { cb(nm, ud); n++; }
+    }
+    CloseHandle(sn);
+    return n;
+}
+
 /* ---------- дочерняя программа ---------- */
 struct PlatFile { HANDLE h; WCHAR path[MAX_PATH]; };
 PlatFile *exe_open(const char *name, char *path, size_t pathn) {
@@ -566,17 +599,64 @@ bool term_zoom(int step) { return t_gui && gb_zoom(step); }
 int term_zoom_pct(void) { return t_gui ? gb_zoom_pct() : 100; }
 
 /* Аргументы в UTF-8: argv от CRT — в кодовой странице ANSI, кириллица в --mic=, --shot-keys=t:... портится. */
-char **plat_utf8_argv(int *argc) {
+/* Разбор командной строки по правилам CommandLineToArgvW (свой: SHELL32 при запуске не грузится — он тянет за собой
+ * Windows.Storage, shcore и ещё ~250 КБ частной памяти, а нужен только для трея, ссылок и перетаскивания файла).
+ * argv[0] — до пробела или в кавычках, без обработки '\'; дальше: 2n '\' + '"' -> n '\' и кавычка-переключатель,
+ * 2n+1 '\' + '"' -> n '\' и '"'; '""' внутри кавычек -> '"'. */
+static int argv_split(const WCHAR *c, WCHAR **out, WCHAR *buf) {
     int n = 0;
-    LPWSTR *w = CommandLineToArgvW(GetCommandLineW(), &n);
-    if (!w || n <= 0) return NULL;
+    WCHAR *o = buf;
+    /* argv[0] */
+    if (out) out[n] = o;
+    if (*c == L'"') { c++; while (*c && *c != L'"') *o++ = *c++; if (*c) c++; }
+    else while (*c && *c != L' ' && *c != L'\t') *o++ = *c++;
+    *o++ = 0;
+    n++;
+    for (;;) {
+        while (*c == L' ' || *c == L'\t') c++;
+        if (!*c) break;
+        if (out) out[n] = o;
+        bool q = false;
+        while (*c && (q || (*c != L' ' && *c != L'\t'))) {
+            if (*c == L'\\') {
+                int bs = 0;
+                while (*c == L'\\') { bs++; c++; }
+                if (*c == L'"') {
+                    for (int i = 0; i < bs / 2; i++) *o++ = L'\\';
+                    if (bs & 1) { *o++ = L'"'; c++; }
+                } else for (int i = 0; i < bs; i++) *o++ = L'\\';
+                continue;
+            }
+            if (*c == L'"') {
+                if (q && c[1] == L'"') { *o++ = L'"'; c += 2; continue; }
+                q = !q;
+                c++;
+                continue;
+            }
+            *o++ = *c++;
+        }
+        *o++ = 0;
+        n++;
+    }
+    return n;
+}
+char **plat_utf8_argv(int *argc) {
+    const WCHAR *cl = GetCommandLineW();
+    size_t len = wcslen(cl);
+    WCHAR *buf = malloc((len + 2) * 2 * sizeof *buf);
+    if (!buf) return NULL;
+    int n = argv_split(cl, NULL, buf);
+    WCHAR **w = calloc((size_t)n + 1, sizeof *w);
+    if (!w) { free(buf); return NULL; }
+    argv_split(cl, w, buf);
     char **v = calloc((size_t)n + 1, sizeof *v);
     for (int i = 0; v && i < n; i++) {
         int k = WideCharToMultiByte(CP_UTF8, 0, w[i], -1, NULL, 0, NULL, NULL);
         v[i] = k > 0 ? malloc((size_t)k) : NULL;
-        if (!v[i] || !WideCharToMultiByte(CP_UTF8, 0, w[i], -1, v[i], k, NULL, NULL)) { LocalFree(w); return NULL; }
+        if (!v[i] || !WideCharToMultiByte(CP_UTF8, 0, w[i], -1, v[i], k, NULL, NULL)) { free(w); free(buf); return NULL; }
     }
-    LocalFree(w);
+    free(w);
+    free(buf);
     if (v) *argc = n;
     return v;
 }

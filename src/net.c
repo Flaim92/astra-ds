@@ -339,6 +339,7 @@ static Req *req_new(const char *method, const char *path, const char *body, Http
         return NULL;
     }
     Req *r = xcalloc(1, sizeof *r);
+    r->r.body.pg_ok = true;                     /* ответ от 32 КБ (история, списки) — страницами, мимо кучи */
     snprintf(r->method, sizeof r->method, "%s", method);
     r->path = xstrdup(path);
     r->body = body ? xstrdup(body) : NULL;
@@ -508,12 +509,14 @@ static const char *cap_what(const Req *r) {
     if (!strcmp(r->method, "POST") && !strcmp(r->path, "/users/@me/channels")) return ui_tr("новая беседа");
     if (!strcmp(r->method, "POST") && strstr(r->path, "/messages") && !strstr(r->path, "/ack") && !strstr(r->path, "/messages/")) return ui_tr("отправка сообщения");
     if (!strcmp(r->method, "PUT") && strstr(r->path, "/reactions/")) return ui_tr("реакция");
+    if (!strcmp(r->method, "POST") && !strncmp(r->path, "/invites/", 9)) return ui_tr("вступление на сервер");
     return ui_tr("запрос к Discord");
 }
 /* Ответ — капча? Тогда запрос остаётся у нас (true), иначе — обычный путь (false). */
 static bool cap_take(Req *r) {
     if (r->r.status != 400 || !r->r.body.p || r->fp) return false;
-    if (!strncmp(r->path, "/invites/", 9)) return false;   /* вступление: капча -> «вступите через браузер» (store.c) */
+    /* вступление на сервер — тоже через своё окно проверки (раньше: капча -> браузер, а сайт просит открыть
+     * официальное приложение); не вышло (нет WebView2, трижды не принято) — store.c покажет причину */
     if (!strstr(r->r.body.p, "captcha_key") && !strstr(r->r.body.p, "captcha_sitekey")) return false;
     if (CP.r && CP.r != r) { ui_notice(ui_tr("Discord просит ещё одну проверку - сначала завершите текущую")); return false; }
     if (r->cap_round >= 3) return false;        /* трижды не принято — отдаём ошибку */
@@ -633,6 +636,7 @@ static void cap_done(Req *r) { if (CP.r == r && !CS.pending) cap_clear(); }
 /* --selftest: подставной ответ 400 с капчей на запрос (без сети); cb получит ответ при отмене. */
 void net_captcha_test(const char *method, const char *path, const char *resp, HttpCb cb, void *ctx) {
     Req *r = xcalloc(1, sizeof *r);
+    r->r.body.pg_ok = true;                     /* ответ от 32 КБ (история, списки) — страницами, мимо кучи */
     snprintf(r->method, sizeof r->method, "%s", method);
     r->path = xstrdup(path);
     r->cb = cb;
@@ -1193,7 +1197,9 @@ static bool ws_send_raw(const char *data, size_t n) {
     return true;
 }
 
+void (*g_gw_spy)(const char *json);             /* selftest: что уходит в шлюз (в рабочем режиме NULL) */
 void gw_send(const char *json) {
+    if (g_gw_spy) g_gw_spy(json);
     if (G.st == GW_LIVE && !ws_send_raw(json, strlen(json))) schedule_retry(ui_tr("связь потеряна"));
 }
 
@@ -1282,6 +1288,7 @@ static void gw_connecting(void) {
     if (sock == CURL_SOCKET_BAD) { schedule_retry(ui_tr("нет сокета")); return; }
     G.sw = sockwait_new((intptr_t)sock);
     memset(&G.z, 0, sizeof G.z);
+    G.text.pg_ok = true;                        /* распакованные пакеты от 32 КБ — страницами мимо кучи */
     if (inflateInit(&G.z) != Z_OK) { schedule_retry("zlib"); return; }
     G.z_ok = true;
     G.st = GW_LIVE;
@@ -1462,10 +1469,14 @@ void gw_service(void) {
         if (G.frame.cap - G.frame.len < CHUNK + 1) {
             size_t c = G.frame.cap ? G.frame.cap : CHUNK * 2;
             while (c - G.frame.len < CHUNK + 1) c *= 2;
-            char *q = xmalloc(c);
-            if (G.frame.p) { memcpy(q, G.frame.p, G.frame.len); wipe(G.frame.p, G.frame.cap); free(G.frame.p); }
+            c = (c + 4095) & ~(size_t)4095;     /* от 32 КБ — страницами мимо кучи (как Buf с pg_ok) */
+            char *q = g_pg_off ? NULL : plat_pages(c);
+            bool pg = q != NULL;
+            if (!q) q = xmalloc(c);
+            if (G.frame.p) { memcpy(q, G.frame.p, G.frame.len); size_t keep = G.frame.len; if (!G.frame.pg) wipe(G.frame.p, G.frame.cap); buf_free(&G.frame); G.frame.len = keep; }
             G.frame.p = q;
             G.frame.cap = c;
+            G.frame.pg = pg;
         }
         char *dst = G.frame.p + G.frame.len;
         size_t got = 0;
@@ -1508,7 +1519,7 @@ i64 gw_next_wake(void) {
 }
 
 void gw_subscribe_ranges(u64 guild, u64 channel, const int *chunk, int n) {
-    if (!guild || !channel || G.st != GW_LIVE || !chunk || n < 1) return;
+    if (!guild || !channel || !chunk || n < 1) return;   /* шлюз не в сети — gw_send не отправит */
     if (n > 3) n = 3;
     char r[128], b[400];
     size_t o = 0;
@@ -1521,7 +1532,7 @@ void gw_subscribe_ranges(u64 guild, u64 channel, const int *chunk, int n) {
     r[o++] = ']';
     r[o] = 0;
     snprintf(b, sizeof b,
-        "{\"op\":14,\"d\":{\"guild_id\":\"%llu\",\"typing\":true,\"threads\":false,\"activities\":false,"
+        "{\"op\":14,\"d\":{\"guild_id\":\"%llu\",\"typing\":true,\"threads\":true,\"activities\":false,"
         "\"members\":[],\"channels\":{\"%llu\":%s},\"thread_member_lists\":[]}}",
         (unsigned long long)guild, (unsigned long long)channel, r);
     gw_send(b);
@@ -1552,6 +1563,17 @@ void gw_voice_state(u64 guild, u64 channel, bool mute, bool deaf) {
     gw_send(b);
 }
 
+/* Выгрузка памяти: простаивающие соединения REST (кэш соединений curl и их TLS) — системе. Только когда
+ * ничего не идёт; следующий запрос откроет соединение заново. Шлюз (G.wm) не трогаем: сообщения идут дальше. */
+bool http_active(void) { return q_active || q_head || UP.r || CP.r; }
+bool http_release_idle(void) {
+    if (q_active || q_head || UP.r || CP.r) return false;
+    if (UP.m) { curl_multi_cleanup(UP.m); UP.m = NULL; }
+    if (!g_multi) return false;
+    curl_multi_cleanup(g_multi);
+    g_multi = NULL;
+    return true;
+}
 void net_cleanup(void) {
     gw_stop();
     while (q_head) { Req *r = q_head; q_head = r->next; free_req(r); }

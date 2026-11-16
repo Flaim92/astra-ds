@@ -82,6 +82,8 @@ static bool dirty(const char *s) {
     return false;
 }
 
+static char st_spy_buf[512];                    /* последняя отправка в шлюз (g_gw_spy) */
+static void st_spy(const char *j) { snprintf(st_spy_buf, sizeof st_spy_buf, "%s", j); }
 static void key(int code, u32 ch) { Key k = { .code = code, .ch = ch }; ui_feed_key(&k); }
 static void key_ctrl(u32 ch) { Key k = { .code = K_CHAR, .ch = ch, .ctrl = true }; ui_feed_key(&k); }
 static void key_alt(u32 ch) { Key k = { .code = K_CHAR, .ch = ch, .alt = true }; ui_feed_key(&k); }
@@ -2613,8 +2615,92 @@ static void t_memlist(void) {
     check(down && on_screen("Админ - 2") && ml_rows_held() <= 300, "список участников (демо): колесо листает, окна подгружаются и отпускаются");
     /* щелчок по участнику — карточка */
     bool card = click("ELDEN RING") && profile_state() && profile_state()->id == 1004;
+    /* большая карточка: вкладки, роли плашками с названиями, общие серверы с ником, Tab, узкое окно */
+    bool tabs = card && on_screen("Обо мне") && on_screen("Общие серверы (3)") && on_screen("Общие друзья (3)");
+    bool rolep = card && on_screen("РОЛИ (1)") && on_screen("o Админ");
+    bool mut = card && click("Общие серверы (3)") && on_screen("Шахматный клуб") && on_screen("ник: Ферзь");
+    key(K_TAB, 0);
+    bool fr = card && on_screen("Ночной Филин") && profile_state()->id == 1004;
+    {
+        Scr s1;
+        scr_take(&s1, 40, 24);                   /* узко: компактная карточка, без выхода за край */
+        scr_free(&s1);
+        scr_take(&s1, 160, 50);
+        scr_free(&s1);
+    }
     key(K_ESC, 0);
+    cur_take();
+    bool rel = !role_name(2000, 2001);           /* карточку закрыли — роли сервера отпущены */
     check(card, "список участников (демо): щелчок по участнику открывает карточку");
+    check(tabs && rolep && mut && fr && rel, "карточка профиля: вкладки, роли с названиями, общие серверы (ник) и друзья, роли освобождаются при закрытии");
+    {   /* выгрузка памяти: смена сервера (уровни), неактивность (сообщения и звонок продлевают), возврат */
+        ui_test_mem_unload(2, 5);
+        ui_open_channel(3001);
+        bool mu0 = S.open_ch == 3001 && S.nmsgs > 0;
+        ui_test_select_guild(0);
+        bool mu1 = S.open_ch == 0 && S.nmsgs == 0 && ml_total(3001) == -1;
+        ui_test_mem_unload(0, 5);
+        ui_open_channel(3001);
+        ui_test_select_guild(0);
+        bool mu2 = S.open_ch == 3001 && S.nmsgs > 0;   /* выкл: канал остаётся */
+        ui_test_mem_unload(2, 5);
+        ui_open_channel(3001);
+        S.typing_until = 0;
+        g_test_inactive = true;
+        ui_tick();
+        g_clock_skew += 4 * 60000; S.typing_until = 0; ui_tick();
+        bool i1 = S.open_ch == 3001;                  /* 4 мин — ещё рано */
+        ui_on_message(3001, false);                    /* вам пишут — таймер сначала */
+        g_clock_skew += 2 * 60000; S.typing_until = 0; ui_tick();
+        bool i2 = S.open_ch == 3001;
+        g_clock_skew += 4 * 60000; S.typing_until = 0; ui_tick();
+        bool i3 = S.open_ch == 0 && S.nmsgs == 0;     /* 6 мин тишины — выгружено */
+        g_test_inactive = false;
+        ui_tick();
+        bool i4 = S.open_ch == 3001 && S.nmsgs > 0;   /* окно снова активно — канал открыт */
+        g_test_inactive = true;
+        g_audio_busy = true;                           /* звонок: никогда */
+        ui_tick();
+        g_clock_skew += 20 * 60000; S.typing_until = 0; ui_tick();
+        bool i5 = S.open_ch == 3001;
+        g_audio_busy = false;
+        ui_test_mem_unload(2, 0);                      /* «выкл» по неактивности */
+        ui_tick();
+        g_clock_skew += 60 * 60000; S.typing_until = 0; ui_tick();
+        bool i6 = S.open_ch == 3001;
+        g_test_inactive = false;
+        ui_test_mem_unload(0, 0);                      /* дальше — как в остальных сценариях */
+        ui_tick();
+        check(mu0 && mu1 && mu2, "выгрузка памяти: смена сервера закрывает канал прежнего сервера и список участников; «выкл» - не трогает");
+        check(i1 && i2 && i3 && i4 && i5 && i6, "выгрузка памяти: через 5 мин неактивности, новое сообщение продлевает, возврат открывает канал, в звонке и при «выкл» - нет");
+    }
+    {   /* активные ветки: подписка op 14 с "threads":true (как официальный клиент), THREAD_LIST_SYNC — только своего сервера */
+        st_spy_buf[0] = 0;
+        g_gw_spy = st_spy;
+        gw_subscribe(2000, 3001);
+        g_gw_spy = NULL;
+        bool t1 = strstr(st_spy_buf, "\"op\":14") && strstr(st_spy_buf, "\"threads\":true") && !strstr(st_spy_buf, "\"threads\":false");
+        threads_open(2000);
+        ev("THREAD_LIST_SYNC", "{\"guild_id\":\"2000\",\"threads\":[{\"id\":\"3199\",\"type\":11,\"name\":\"живая ветка\",\"parent_id\":\"3001\",\"guild_id\":\"2000\",\"thread_metadata\":{\"archived\":false}}]}");
+        ev("THREAD_LIST_SYNC", "{\"guild_id\":\"2100\",\"threads\":[{\"id\":\"3198\",\"type\":11,\"name\":\"чужая\",\"parent_id\":\"3100\",\"guild_id\":\"2100\",\"thread_metadata\":{\"archived\":false}}]}");
+        bool t2 = chan_find(3199) && !chan_find(3198);
+        ev("THREAD_DELETE", "{\"id\":\"3199\",\"guild_id\":\"2000\",\"parent_id\":\"3001\",\"type\":11}");
+        check(t1 && t2, "активные ветки: op 14 с threads:true вместо REST /threads/active (403), THREAD_LIST_SYNC своего сервера принят, чужого - нет");
+    }
+    {   /* большие ответы мимо кучи: Buf с pg_ok от 32 КБ — страницы, содержимое цело; без pg_ok — как раньше */
+        Buf pb = { .pg_ok = true }, hb = {0};
+        char chunk[1000];
+        for (int k = 0; k < (int)sizeof chunk; k++) chunk[k] = (char)('a' + k % 26);
+        for (int k = 0; k < 100; k++) { buf_put(&pb, chunk, sizeof chunk); buf_put(&hb, chunk, sizeof chunk); }
+        bool p1 = pb.pg && pb.len == 100000 && pb.cap >= 100001 && pb.cap % 4096 == 0 && pb.p[99999] == chunk[999] && pb.p[100000] == 0 && !memcmp(pb.p + 5000, chunk, sizeof chunk);
+        bool p2 = !hb.pg && hb.len == 100000 && !memcmp(hb.p, pb.p, 100000);
+        buf_free(&pb); buf_free(&hb);
+        bool p3 = !pb.p && !pb.pg && pb.pg_ok && !pb.cap;
+        buf_put(&pb, "x", 1);
+        bool p4 = !pb.pg && pb.len == 1;              /* маленький — снова из кучи */
+        buf_free(&pb);
+        check(p1 && p2 && p3 && p4, "большие ответы мимо кучи: от 32 КБ страницами (содержимое цело), освобождение, малые — из кучи");
+    }
     ml_close();
     g_clock_skew = skew0;
     O.demo = demo;
@@ -2683,7 +2769,7 @@ static void t_friends(void) {
     int n = rel_list(&rs);
     bool sorted = true;
     for (int i = 1; i < n; i++) if (rs[i - 1].id >= rs[i].id) sorted = false;
-    check(n == 8 && sorted && sizeof(Relation) == 16, "READY relationships: 8 записей (тип 5 не хранится), по id, 16 байт на запись");
+    check(n == 8 && sorted && sizeof(Relation) <= 32, "READY relationships: 8 записей (тип 5 не хранится), по id, не больше 32 байт на запись (с игрой для «Активно сейчас»)");
     check(rel_type(1001) == REL_FRIEND && rel_type(1007) == REL_IN && rel_type(1008) == REL_OUT && rel_type(1009) == REL_BLOCKED && !rel_find(1003),
           "типы: друг / входящая / исходящая / заблокирован");
     check(!strcmp(user_name(1007), "Незнакомец"), "имя из объекта user в записи отношения");
@@ -3616,15 +3702,27 @@ static void t_packb3(void) {
     g_http_guard = NULL; O.demo = true;
     check(c1 && c2 && c3 && c4 && c5 && c6 && c7, "№55 кнопки ботов: разбор (ссылки только https), недоступная, выбор по min/max, POST /interactions, одно нажатие за раз, тайм-аут 5 с");
     ev("MESSAGE_DELETE", "{\"id\":\"882000\",\"channel_id\":\"3004\"}");
-    /* №99 полный профиль */
+    /* №99 полный профиль: общие серверы (с ником на сервере) и друзья — сразу, тем же запросом */
     profile_open_full(1001, 2000);
     const Profile *pf = profile_state();
-    bool p1 = pf->full && pf->nmutual == 1 && pf->mutual[0] == 2000 && pf->nfriends == 1 && pf->friends[0] == 1002 && pf->nconn == 1 && strstr(pf->conn[0], "github");
+    bool p1 = pf->full && pf->nmutual == 3 && pf->mutual[0] == 2000 && pf->mutual[1] == 2500 && pf->nfriends == 3 && pf->friends[0] == 1002 &&
+              pf->nconn == 1 && strstr(pf->conn[0], "github") && pf->mutual_nick && !pf->mutual_nick[0] && pf->mutual_nick[1] &&
+              !strcmp(pf->mutual_nick[1], "Ферзь") && !pf->mutual_nick[2];
     profile_close();
     profile_open(1001, 2000);
-    bool p2 = !profile_state()->full && !profile_state()->nmutual;
+    bool p2 = profile_state()->full && profile_state()->nmutual == 3 && profile_state()->nfriends == 3;
     profile_close();
-    check(p1 && p2, "№99 полный профиль: общие серверы и друзья, привязки — только по profile_open_full, закрытие освобождает");
+    bool p3 = !profile_state()->nmutual && !profile_state()->mutual && !profile_state()->mutual_nick && !profile_state()->friends;
+    check(p1 && p2 && p3, "№99 профиль: общие серверы (и ник на них), друзья и привязки сразу при открытии, закрытие освобождает");
+    /* роли для карточки: освобождаются при закрытии, чужой сервер не трогается */
+    const RoleName *rl0 = NULL;
+    int nr0 = guild_roles(2000, &rl0);
+    bool r1 = nr0 == 4 && role_name(2000, 2001) && !strcmp(role_name(2000, 2001), "Админ");
+    roles_release(2100);
+    bool r2 = role_name(2000, 2001) != NULL;
+    roles_release(2000);
+    bool r3 = role_name(2000, 2001) == NULL;
+    check(r1 && r2 && r3, "карточка профиля: имена ролей сервера по требованию, roles_release освобождает только свой сервер");
     /* №109/111 запросы и группы */
     ev("CHANNEL_CREATE", "{\"id\":\"3700\",\"type\":1,\"recipients\":[{\"id\":\"1007\",\"username\":\"stranger\"}],\"is_message_request\":true,\"last_message_id\":\"9999\"}");
     ev("CHANNEL_CREATE", "{\"id\":\"3701\",\"type\":1,\"recipients\":[{\"id\":\"1008\",\"username\":\"spammer\"}],\"is_spam\":true}");
@@ -4961,6 +5059,7 @@ int selftest(void) {
     size_t m0 = plat_private_bytes();
     O.demo = true;
     ui_init();
+    ui_test_mem_unload(0, 0);                    /* выгрузка памяти — только в своей проверке: сценарии ниже ходят по серверам */
     demo_load();
     ui_on_ready();
     {   /* №2: демо-READY — папки из user_settings_proto (с именем и цветом; без имени; из 1, 3 и 4 серверов) */
@@ -5114,6 +5213,30 @@ int selftest_keyring(void) {
         check(keyring_load_raw("vless", false, buf, 64) < 0 && keyring_load_raw("vless", true, buf, 64) < 0,
               "удаление (--logout, паника) стирает запись под обоими именами");
         wipe(buf, sizeof buf);
+    }
+    {   /* несколько аккаунтов: два токена под своими записями, список, переключение, удаление, полная очистка */
+        static const char T1[] = "MTAwMDAwMDAwMDAwMDAwMDAx.AAAAAA.astra-acct-test-token-one-11";
+        static const char T2[] = "MTAwMDAwMDAwMDAwMDAwMDAy.BBBBBB.astra-acct-test-token-two-22";
+        AcctInfo a[ACC_MAX];
+        acct_wipe_all();
+        secret_set(T1, sizeof T1 - 1);
+        bool s1 = acct_save_current(1001, "Первый\tс\nтабом");
+        secret_set(T2, sizeof T2 - 1);
+        bool s2 = acct_save_current(1002, "Второй");
+        int n = acct_list(a, ACC_MAX);
+        check(s1 && s2 && n == 2 && a[0].id == 1001 && a[1].id == 1002 && !strcmp(a[0].name, "Первыйстабом") && !strcmp(a[1].name, "Второй"),
+              "аккаунты: два сохранены, список по порядку, управляющие символы из имени выброшены");
+        check(acct_load(1001) && secret_token() && !strcmp(secret_token(), T1), "аккаунты: переключение читает токен первого");
+        check(!acct_load(4242) && secret_token() && !strcmp(secret_token(), T1), "аккаунты: нет записи — отказ, текущий токен не тронут");
+        acct_delete(1001);
+        n = acct_list(a, ACC_MAX);
+        check(n == 1 && a[0].id == 1002 && !acct_load(1001), "аккаунты: удалённый пропал из списка и хранилища");
+        for (int i = 0; i < ACC_MAX + 1; i++) { secret_set(T1, sizeof T1 - 1); acct_save_current(2000 + (u64)i, "x"); }
+        n = acct_list(a, ACC_MAX);
+        check(n == ACC_MAX, "аккаунты: больше ACC_MAX не добавляется");
+        acct_wipe_all();
+        check(acct_list(a, ACC_MAX) == 0 && !acct_load(1002) && !acct_load(2000), "аккаунты: полная очистка (--logout, паника) — пусто");
+        secret_set("", 0);
     }
     secret_destroy();
     check(secret_token() == NULL, "защищённая память освобождена");
@@ -6110,6 +6233,55 @@ static int live_golive(void) {
 }
 #endif
 
+/* MC_LIVE=mem: замер памяти на живом аккаунте — только чтение (g_readonly: ничего, кроме GET), невидимо, без отметок
+ * о прочтении; на диск ничего, итог — в консоль. Вход, 20 с покоя; 4 текстовых канала разных серверов с паузами
+ * как у человека; возврат на главную с выгрузкой памяти. */
+static void lv_mem_line(const char *what) {
+    plat_trim();                                 /* как в приложении после смены канала (trim_step) */
+    size_t hu = 0, hf = 0;
+    plat_heap_stats(&hu, &hf);
+    MemBreak mb;
+    store_mem_breakdown(&mb);
+    say("  [%s] частная %.2f МБ; куча: занято %u КБ, не отдано системе %u КБ\n", what, plat_private_bytes() / 1048576.0, (unsigned)(hu / 1024), (unsigned)(hf / 1024));
+    say("      каналы %u + названия %u КБ (%d шт., %d Б каждый), права %u КБ (%d), роли %u КБ (%d), серверы %u КБ,\n"
+        "      пользователи %u + имена %u КБ (%d шт., %d Б каждый), сообщения %u КБ, участники %u КБ, друзья %u КБ; выделений %d\n",
+        (unsigned)(mb.chans / 1024), (unsigned)(mb.chan_str / 1024), mb.nchans, (int)sizeof(Channel), (unsigned)(mb.ow / 1024), mb.now_, (unsigned)(mb.roles / 1024), mb.nroles, (unsigned)(mb.guilds / 1024),
+        (unsigned)(mb.users / 1024), (unsigned)(mb.user_str / 1024), mb.nusers, (int)sizeof(User), (unsigned)(mb.msgs / 1024), (unsigned)(ml_mem_bytes() / 1024), (unsigned)(mb.rels / 1024), mb.nalloc);
+}
+static int live_mem(void) {
+    lv_pump(20000);
+    plat_trim();
+    lv_pump(500);
+    lv_mem_line("после входа, 20 с покоя");
+    ui_test_mem_unload(2, 0);
+    u64 seen[4] = { 0 };
+    int opened = 0;
+    for (int i = 0; i < S.nchans && opened < 4; i++) {
+        const Channel *c = &S.chans[i];
+        if (!c->guild_id || c->type != CH_TEXT || !c->visible || !c->can_history) continue;
+        bool dup = false;
+        for (int k = 0; k < opened; k++) if (seen[k] == c->guild_id) dup = true;
+        if (dup) continue;
+        seen[opened++] = c->guild_id;
+        u64 cg = c->guild_id;
+        threads_open(cg);                        /* как при выборе сервера в окне: принимать его THREAD_LIST_SYNC */
+        ui_open_channel(c->id);
+        lv_pump(5000 + (int)(now_ms() % 2000));
+        int nt = 0;
+        for (int k = 0; k < S.nchans; k++) if (S.chans[k].guild_id == cg && (S.chans[k].type == CH_THREAD || S.chans[k].type == CH_NEWS_THREAD || S.chans[k].type == CH_PRIV_THREAD)) nt++;
+        say("  сервер %d: активных веток пришло %d\n", opened, nt);
+    }
+    lv_mem_line("после 4 каналов на разных серверах");
+    {   /* активные ветки: приходят THREAD_LIST_SYNC по подписке op 14 (REST /threads/active больше не шлём) */
+        int nt = 0;
+        for (int i = 0; i < S.nchans; i++) if (S.chans[i].type == CH_THREAD || S.chans[i].type == CH_NEWS_THREAD || S.chans[i].type == CH_PRIV_THREAD) nt++;
+        say("  активных веток в модели: %d (последний открытый сервер и мои)\n", nt);
+    }
+    ui_test_select_guild(0);
+    lv_pump(3000);
+    lv_mem_line("главная, после выгрузки прежнего сервера");
+    return 0;
+}
 int selftest_live(void) {
     term_puts("Astra DS --livetest: записи на живом аккаунте (свой тестовый сервер; MC_LIVE=dm — ЛС с MC_LIVE_FRIEND)\n");
     g_headless = true;
@@ -6124,6 +6296,12 @@ int selftest_live(void) {
     ui_init();
     g_http_guard = lv_guard;
     g_http_trace = lv_trace;
+    {   /* MC_LIVE=mem: только чтение, невидимо, без отметок о прочтении — с самого входа */
+        const char *m0 = getenv("MC_LIVE");
+        if (m0 && !strcmp(m0, "mem")) { g_readonly = true; O.invisible = true; O.no_ack = true; }
+        const char *np = getenv("MC_NOPG");
+        if (np && !strcmp(np, "1")) g_pg_off = true;   /* сравнение: крупные блоки из кучи, как до правки */
+    }
     gw_start();
     LV_WAIT(S.ready && !strcmp(gw_status_text(), "в сети"), 60000);
     check(S.ready, "READY (по одному серверу) и gateway «в сети»");
@@ -6142,6 +6320,7 @@ int selftest_live(void) {
     if (mode && !strcmp(mode, "golive")) rc |= live_golive();
 #endif
     if (mode && !strcmp(mode, "friends")) { g_readonly = true; rc |= live_friends(); }   /* только чтение */
+    if (mode && !strcmp(mode, "mem")) rc |= live_mem();   /* только чтение (g_readonly выставлен до входа) */
     say("\n  записей: %d, ошибок ответа: %d, остановлено сторожем: %d\n", lv_writes, lv_errors, lv_blocked);
     say("Итог: %d ok, %d FAIL\n", passes, fails);
     g_http_guard = NULL;

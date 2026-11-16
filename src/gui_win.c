@@ -27,7 +27,6 @@ static HFONT f_norm, f_bold;
 static HFONT f_ital;                            /* курсив (SGR 3), при первой нужде */
 static HFONT f_wide;                            /* запасной шрифт для символов, которых нет в основном (CJK и пр.) */
 static bool f_wide_tried;
-static HFONT f_small[5];                        /* мелкая сетка картинок: высота клетки / K, K = 2..4 */
 static const WCHAR *face_used = L"Consolas";
 static int cw = 8, chh = 16, asc = 12;          /* клетка и базовая линия, пикселы */
 static UINT dpi = 96;
@@ -112,26 +111,12 @@ static void fonts_make(void) {
     if (chh < 4) chh = 4;
     if (cw < 2) cw = 2;
     SelectObject(dc, old);
-    /* мелкие шрифты: высота ячейки (положительная lfHeight) = высота клетки / K, не меньше 3 px */
-    for (int k = 2; k <= 4; k++) {
-        if (f_small[k]) DeleteObject(f_small[k]);
-        f_small[k] = NULL;
-        if (chh / k < 3) continue;
-        LOGFONTW lf = {0};
-        lf.lfHeight = chh / k;
-        lf.lfWidth = cw / k > 0 ? cw / k : 1;
-        lf.lfWeight = FW_NORMAL;
-        lf.lfCharSet = DEFAULT_CHARSET;
-        lf.lfOutPrecision = OUT_TT_PRECIS;
-        lf.lfQuality = ANTIALIASED_QUALITY;
-        lf.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
-        wcsncpy(lf.lfFaceName, face_used, LF_FACESIZE - 1);
-        f_small[k] = CreateFontIndirectW(&lf);
-    }
     ReleaseDC(hwnd, dc);
 }
+/* Слои мелкой сетки рисуются растром (draw_layers), шрифт для них не нужен; K — прежнее правило
+ * «мелкая клетка не ниже 3 px», чтобы ui.c получал тот же масштаб, что и раньше. */
 int gb_fine_scale(void) {
-    for (int k = 4; k >= 2; k--) if (f_small[k]) return k;
+    for (int k = 4; k >= 2; k--) if (chh / k >= 3) return k;
     return 0;
 }
 static void on_size(void);
@@ -314,35 +299,62 @@ static void draw_row(HDC dc, int y) {
         draw_text(dc, i0, &r, wb, n, dx);
     }
 }
-/* Слои мелкой сетки поверх строки y: мелкие клетки, у которых верх внутри этой строки. Координаты
- * мелких клеток — пропорциональные (клетка не делится на K нацело), прогоны одинаковых цветов. */
+/* ---------- слои мелкой сетки: картинка растром ----------
+ * img.c подбирает для каждой мелкой клетки символ и два цвета так, что bg + cov[i] * (fg - bg) по таблице
+ * закраски (2 x 4 части) повторяет 2 x 4 пикселя исходной картинки. Здесь та же смесь восстанавливает пиксели:
+ * слой — картинка (2K*w) x (4K*h) пикселей, она растягивается на свои клетки билинейно. Раньше слой рисовался
+ * шрифтом высотой 3-5 px — глаз видел кашу; данные и поток те же, памяти — буфер одной строки на время рисования. */
+static u32 lay_px(const Layer *l, int sx, int sy) {     /* пиксель слоя (в частях: 2 на мелкую клетку по x, 4 по y) */
+    int fw = l->k * l->w, fh = l->k * l->h;
+    if (sx < 0) sx = 0;
+    if (sy < 0) sy = 0;
+    if (sx >= 2 * fw) sx = 2 * fw - 1;
+    if (sy >= 4 * fh) sy = 4 * fh - 1;
+    const u8 *c = l->c + ((size_t)(sy >> 2) * (size_t)fw + (size_t)(sx >> 1)) * 7;
+    int a = img_glyph_cov[c[0] >= 0x20 && c[0] <= 0x7E ? c[0] - 0x20 : 0][(sy & 3) * 2 + (sx & 1)];
+    int r = c[4] + ((c[1] - c[4]) * a) / 255, g = c[5] + ((c[2] - c[5]) * a) / 255, b = c[6] + ((c[3] - c[6]) * a) / 255;
+    return (u32)r << 16 | (u32)g << 8 | (u32)b;
+}
+static u32 mix2(u32 a, u32 b, int f) {           /* a + (b - a) * f / 256 по каналам */
+    u32 o = 0;
+    for (int s = 0; s <= 16; s += 8) {
+        int x = (int)(a >> s & 255), y = (int)(b >> s & 255);
+        o |= (u32)(x + (((y - x) * f) >> 8)) << s;
+    }
+    return o;
+}
+/* Строка y сетки: часть каждого слоя, попавшая в неё, — одним StretchDIBits 1:1 (масштаб посчитан здесь). */
 static void draw_layers(HDC dc, int y) {
-    static WCHAR wb[2000];
-    static INT dx[2000];
     for (int li = 0; li < G.nlay; li++) {
         const Layer *l = &G.lay[li];
-        if (y < l->y || y >= l->y + l->h || !f_small[l->k]) continue;
-        int fw = l->k * l->w, fh = l->k * l->h, X0 = l->x * cw, Y0 = l->y * chh, PW = l->w * cw, PH = l->h * chh;
-        SelectObject(dc, f_small[l->k]);
-        for (int fy = (y - l->y) * l->k; fy < (y - l->y + 1) * l->k && fy < fh; fy++) {
-            int top = Y0 + fy * PH / fh, bot = Y0 + (fy + 1) * PH / fh;
-            const u8 *c = l->c + (size_t)fy * fw * 7;
-            for (int fx = 0; fx < fw; ) {
-                int f0 = fx, n = 0;
-                const u8 *a = c + (size_t)fx * 7;
-                while (fx < fw && n < 2000 && !memcmp(c + (size_t)fx * 7 + 1, a + 1, 6)) {
-                    wb[n] = (WCHAR)c[(size_t)fx * 7];
-                    dx[n] = (X0 + (fx + 1) * PW / fw) - (X0 + fx * PW / fw);
-                    n++;
-                    fx++;
-                }
-                RECT r = { X0 + f0 * PW / fw, top, X0 + fx * PW / fw, bot };
-                SetTextColor(dc, RGB(a[1], a[2], a[3]));
-                SetBkColor(dc, RGB(a[4], a[5], a[6]));
-                ExtTextOutW(dc, r.left, r.top, ETO_OPAQUE | ETO_CLIPPED, &r, wb, (UINT)n, dx);
+        if (y < l->y || y >= l->y + l->h) continue;
+        int PW = l->w * cw, PH = l->h * chh, SW = 2 * l->k * l->w, SH = 4 * l->k * l->h, ry = (y - l->y) * chh;
+        if (PW <= 0 || chh <= 0) continue;
+        u32 *px = malloc((size_t)PW * (size_t)chh * sizeof *px);
+        if (!px) continue;
+        for (int dy = 0; dy < chh; dy++) {
+            /* центр пикселя назначения в координатах источника, 1/256 части */
+            long long vv = (long long)(2 * (ry + dy) + 1) * SH * 128 / PH - 128;
+            int v0 = (int)(vv >> 8), fv = (int)(vv & 255);
+            u32 *o = px + (size_t)dy * PW;
+            for (int dx = 0; dx < PW; dx++) {
+                long long uu = (long long)(2 * dx + 1) * SW * 128 / PW - 128;
+                int u0 = (int)(uu >> 8), fu = (int)(uu & 255);
+                u32 top = mix2(lay_px(l, u0, v0), lay_px(l, u0 + 1, v0), fu);
+                u32 bot = mix2(lay_px(l, u0, v0 + 1), lay_px(l, u0 + 1, v0 + 1), fu);
+                o[dx] = mix2(top, bot, fv);
             }
         }
-        SelectObject(dc, f_norm);
+        BITMAPINFO bi = {0};
+        bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+        bi.bmiHeader.biWidth = PW;
+        bi.bmiHeader.biHeight = -chh;            /* сверху вниз */
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        SetStretchBltMode(dc, COLORONCOLOR);
+        StretchDIBits(dc, l->x * cw, y * chh, PW, chh, 0, 0, PW, chh, px, &bi, DIB_RGB_COLORS, SRCCOPY);
+        free(px);
     }
 }
 #ifdef ASTRA_VIDEO
@@ -394,7 +406,79 @@ static void vid_paint(HDC dc) {
     gcam_paint_unlock();
 }
 #endif
-static void paint(HDC dc, const RECT *rc, int cl_right) {
+/* ---------- картинка просмотра растром (img_full) поверх клеток ----------
+ * Область заливается фоном просмотра, картинка — по центру: помещается — 1:1 (прокси уже прислал под размер
+ * окна), не помещается (окно только что уменьшили, новая ещё качается) — вписывается с пропорциями. */
+bool gb_pic_ok(void) { return hwnd != NULL; }
+static int cur_kind;                            /* 0 — стрелка, 1 — «<->» над краем колонки */
+static HCURSOR cur_get(void) { return LoadCursorW(NULL, cur_kind ? IDC_SIZEWE : IDC_ARROW); }
+void gb_cursor(int kind) {
+    if (kind == cur_kind || !hwnd || hidden) { cur_kind = kind; return; }
+    cur_kind = kind;
+    POINT p;
+    RECT c;
+    if (GetCursorPos(&p) && ScreenToClient(hwnd, &p) && GetClientRect(hwnd, &c) && PtInRect(&c, p)) SetCursor(cur_get());
+}
+void gb_cell_size(int *w, int *h) { *w = cw; *h = chh; }
+static void draw_pic(HDC dc, int y0, int y1) {
+    GpPic p;
+    if (!gpic_get(&p) || p.y + p.h <= y0 || p.y >= y1) return;
+    RECT a = { p.x * cw, p.y * chh, (p.x + p.w) * cw, (p.y + p.h) * chh };
+    RECT band = { a.left, y0 * chh, a.right, y1 * chh }, f;
+    if (IntersectRect(&f, &a, &band)) fill(dc, &f, p.bg);
+    int aw = a.right - a.left, ah = a.bottom - a.top, dw = p.pw, dh = p.ph;
+    if (dw > aw || dh > ah) {
+        if ((long long)p.pw * ah > (long long)p.ph * aw) { dw = aw; dh = (int)((long long)p.ph * aw / p.pw); }
+        else { dh = ah; dw = (int)((long long)p.pw * ah / p.ph); }
+    }
+    if (dw < 1 || dh < 1) return;
+    int dx = a.left + (aw - dw) / 2, dy = a.top + (ah - dh) / 2;
+    if (dy + dh <= band.top || dy >= band.bottom) return;
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = p.pw;
+    bi.bmiHeader.biHeight = -p.ph;               /* сверху вниз */
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    SetStretchBltMode(dc, COLORONCOLOR);         /* 1:1 — просто копия; вписывание — до прихода картинки под размер */
+    StretchDIBits(dc, dx, dy, dw, dh, 0, 0, p.pw, p.ph, p.px, &bi, DIB_RGB_COLORS, SRCCOPY);
+}
+/* Строки [y0, y1) в dc (координаты — как на экране; для полосы в памяти — со сдвигом начала координат). */
+static void paint_rows(HDC dc, int y0, int y1) {
+    SetBkMode(dc, OPAQUE);
+    SetTextAlign(dc, TA_TOP | TA_LEFT | TA_NOUPDATECP);
+    HGDIOBJ old = SelectObject(dc, f_norm);
+    for (int y = y0 < 0 ? 0 : y0; y < y1; y++) { draw_row(dc, y); if (G.nlay) draw_layers(dc, y); }
+    draw_pic(dc, y0 < 0 ? 0 : y0, y1);
+    SelectObject(dc, old);
+}
+/* Двойная буферизация полосами: строки рисуются в память по BAND штук и выходят на экран одним BitBlt —
+ * строка с картинкой не показывается сначала грубым ASCII, а потом слоем поверх (мерцание при наведении).
+ * Буфер — только на время WM_PAINT (полоса шириной окна, ~0,6 МБ при 1920 px), в простое памяти не занимает.
+ * false — буфер не создался: рисовать напрямую, как раньше. */
+#define BAND 4
+static bool paint_buffered(HDC dc, int y0, int y1, int x0, int x1) {
+    if (y0 < 0) y0 = 0;
+    if (x1 > G.cols * cw) x1 = G.cols * cw;
+    if (y0 >= y1 || x0 >= x1) return true;
+    HDC mem = CreateCompatibleDC(dc);
+    if (!mem) return false;
+    HBITMAP bm = CreateCompatibleBitmap(dc, x1, BAND * chh);
+    if (!bm) { DeleteDC(mem); return false; }
+    HGDIOBJ ob = SelectObject(mem, bm);
+    for (int y = y0; y < y1; y += BAND) {
+        int e = y + BAND < y1 ? y + BAND : y1;
+        SetViewportOrgEx(mem, 0, -y * chh, NULL);
+        paint_rows(mem, y, e);
+        BitBlt(dc, x0, y * chh, x1 - x0, (e - y) * chh, mem, x0, y * chh, SRCCOPY);
+    }
+    SelectObject(mem, ob);
+    DeleteObject(bm);
+    DeleteDC(mem);
+    return true;
+}
+static void paint(HDC dc, const RECT *rc, int cl_right, bool buffered) {
 #ifdef ASTRA_VIDEO
     RECT vr[VID_RECTS];
     int nv = vid_rects(vr);
@@ -410,18 +494,14 @@ static void paint(HDC dc, const RECT *rc, int cl_right) {
     }
     if (vid) for (int i = 0; i < nv; i++) ExcludeClipRect(dc, vr[i].left, vr[i].top, vr[i].right, vr[i].bottom);
 #endif
-    SetBkMode(dc, OPAQUE);
-    SetTextAlign(dc, TA_TOP | TA_LEFT | TA_NOUPDATECP);
-    HGDIOBJ old = SelectObject(dc, f_norm);
     int y0 = rc->top / chh, y1 = (rc->bottom + chh - 1) / chh;
     if (y1 > G.rows) y1 = G.rows;
-    for (int y = y0 < 0 ? 0 : y0; y < y1; y++) { draw_row(dc, y); if (G.nlay) draw_layers(dc, y); }
+    if (!buffered || !paint_buffered(dc, y0, y1, rc->left, rc->right)) paint_rows(dc, y0, y1);
     /* поля справа и снизу (доли клетки) — цветом фона */
     RECT m1 = { G.cols * cw, rc->top, cl_right, rc->bottom };
     if (m1.left < m1.right) fill(dc, &m1, G.def_bg);
     RECT m2 = { rc->left, G.rows * chh, cl_right, rc->bottom };
     if (m2.top < m2.bottom) fill(dc, &m2, G.def_bg);
-    SelectObject(dc, old);
 #ifdef ASTRA_VIDEO
     if (vid) { SelectClipRgn(dc, NULL); vid_paint(dc); }
 #endif
@@ -444,6 +524,8 @@ void gb_flush(void) {
 
 /* Окно активно: отметки о прочтении уходят только тогда (без окна — консоль — считаем активным). */
 bool win_focused(void) { return !hwnd || hidden || GetForegroundWindow() == hwnd; }
+/* Выгрузка памяти: окно перед пользователем — в фокусе, не свёрнуто и не в трее (без окна — true). */
+bool win_active(void) { return !hwnd || (!hidden && !IsIconic(hwnd) && GetForegroundWindow() == hwnd); }
 
 /* Один экземпляр на пользователя Windows: именованный мьютекс сеанса (без файлов). Уже запущен —
  * поднять его окно и выйти. Описатель держится до выхода процесса (система закроет сама). */
@@ -599,7 +681,7 @@ bool gb_snapshot(const char *path) {
     if (bm) {
         HGDIOBJ o = SelectObject(mdc, bm);
         RECT all = { 0, 0, w, h };
-        paint(mdc, &all, w);
+        paint(mdc, &all, w, false);      /* DC уже в памяти */
         GdiFlush();
         SelectObject(mdc, o);
         WCHAR wp[MAX_PATH];
@@ -773,11 +855,14 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = BeginPaint(h, &ps);
         RECT cl;
         GetClientRect(h, &cl);
-        if (G.ch) paint(dc, &ps.rcPaint, cl.right);
+        if (G.ch) paint(dc, &ps.rcPaint, cl.right, true);
         EndPaint(h, &ps);
         return 0;
     }
     case WM_ERASEBKGND: return 1;               /* фон рисует WM_PAINT вместе с текстом: без мерцания */
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) { SetCursor(cur_get()); return TRUE; }
+        break;
     case WM_SIZE:
         if (wp == SIZE_MINIMIZED && O.tray && !hidden) { tray_add(); if (tray_added) ShowWindow(h, SW_HIDE); return 0; }   /* --tray */
         if (wp != SIZE_MINIMIZED && !hidden) on_size();
@@ -900,7 +985,8 @@ bool gb_open(bool hide) {
         grid_resize(COLS0, ROWS0);
         return true;
     }
-    hwnd = CreateWindowExW(0, L"Astra DS", L"Astra DS", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+    /* WS_EX_ACCEPTFILES вместо DragAcceptFiles: перетаскивание файла без загрузки SHELL32 при запуске */
+    hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, L"Astra DS", L"Astra DS", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                            CW_USEDEFAULT, CW_USEDEFAULT, NULL, NULL, hi, NULL);
     if (!hwnd) return false;
 #ifdef ASTRA_VIDEO
@@ -908,7 +994,6 @@ bool gb_open(bool hide) {
 #endif
     dpi = GetDpiForWindow(hwnd);
     if (!dpi) dpi = 96;
-    DragAcceptFiles(hwnd, TRUE);                /* перетаскивание файла в окно */
     theme_load();
     fonts_make();
     /* начальный размер — COLS0 x ROWS0 клеток, но не больше рабочей области монитора */
