@@ -1986,6 +1986,7 @@ bool rel_add_name(const char *username, char *err, size_t errn) {
 static Profile PF;
 static char *pf_s[4];                           /* name, username, pronouns, bio */
 static u64 *pf_roles, *pf_mut, *pf_fr;          /* №99: общие серверы и друзья */
+static char **pf_mut_nick;                      /* ники на общих серверах, параллельно pf_mut */
 static char *pf_conn[8];
 static bool pf_full;
 static unsigned pf_gen;
@@ -1994,6 +1995,9 @@ void profile_close(void) {
     for (int i = 0; i < 4; i++) { free(pf_s[i]); pf_s[i] = NULL; }
     free(pf_roles);
     pf_roles = NULL;
+    for (int i = 0; pf_mut_nick && i < PF.nmutual; i++) free(pf_mut_nick[i]);
+    free(pf_mut_nick);
+    pf_mut_nick = NULL;
     free(pf_mut); free(pf_fr);
     pf_mut = pf_fr = NULL;
     for (int i = 0; i < 8; i++) { free(pf_conn[i]); pf_conn[i] = NULL; }
@@ -2048,7 +2052,16 @@ void profile_apply(const cJSON *j) {
         if (nm > 100) nm = 100;
         if (nf > 100) nf = 100;
         const cJSON *x;
-        if (nm > 0) { pf_mut = xcalloc((size_t)nm, sizeof(u64)); cJSON_ArrayForEach(x, jget(j, "mutual_guilds")) { if (PF.nmutual >= nm) break; if (jid(x, "id")) pf_mut[PF.nmutual++] = jid(x, "id"); } }
+        if (nm > 0) {
+            pf_mut = xcalloc((size_t)nm, sizeof(u64));
+            pf_mut_nick = xcalloc((size_t)nm, sizeof(char *));
+            cJSON_ArrayForEach(x, jget(j, "mutual_guilds")) {
+                if (PF.nmutual >= nm) break;
+                if (!jid(x, "id")) continue;
+                pf_mut_nick[PF.nmutual] = pf_str(jstr(x, "nick"), false, 40);   /* ник на том сервере, если задан */
+                pf_mut[PF.nmutual++] = jid(x, "id");
+            }
+        }
         if (nf > 0) {
             pf_fr = xcalloc((size_t)nf, sizeof(u64));
             cJSON_ArrayForEach(x, jget(j, "mutual_friends")) {
@@ -2069,6 +2082,7 @@ void profile_apply(const cJSON *j) {
             if (pf_conn[PF.nconn]) { PF.conn[PF.nconn] = pf_conn[PF.nconn]; PF.nconn++; }
         }
         PF.mutual = pf_mut;
+        PF.mutual_nick = (const char *const *)pf_mut_nick;
         PF.friends = pf_fr;
     }
     ui_dirty();
@@ -2082,7 +2096,8 @@ static void on_profile(Resp *r, void *ctx) {
     json_done();
 }
 static void profile_req(u64 uid, u64 guild_id, bool full);
-void profile_open(u64 uid, u64 guild_id) { profile_req(uid, guild_id, false); }
+/* Общие серверы и друзья — сразу, тем же единственным запросом (так открывает профиль и официальный клиент). */
+void profile_open(u64 uid, u64 guild_id) { profile_req(uid, guild_id, true); }
 void profile_open_full(u64 uid, u64 guild_id) { profile_req(uid, guild_id, true); }
 static void profile_req(u64 uid, u64 guild_id, bool full) {
     profile_close();
@@ -2588,7 +2603,7 @@ const char *guild_description(u64 gid) {
     http_async("GET", path, NULL, on_guild_desc, (void *)(uintptr_t)gid);
     return NULL;
 }
-static struct { u64 gid; bool loaded, busy; RoleName *r; int n; } RL;
+static struct { u64 gid; bool loaded, busy, drop; RoleName *r; int n; } RL;   /* drop: карточку закрыли, пока шёл запрос */
 static void roles_free(void) {
     for (int i = 0; i < RL.n; i++) free(RL.r[i].name);
     free(RL.r);
@@ -2615,6 +2630,7 @@ static void roles_fill(const cJSON *arr) {
 static void on_roles(Resp *r, void *ctx) {
     if ((u64)(uintptr_t)ctx != RL.gid) return;
     RL.busy = false;
+    if (RL.drop) { RL.drop = false; RL.gid = 0; RL.loaded = false; return; }   /* уже не нужны */
     if (r->status == 200) { cJSON *j = json_parse(r->body.p ? r->body.p : "", r->body.len); roles_fill(j); json_done(); }
     else RL.loaded = true;                      /* пусто: ошибка — ui покажет «ролей нет» */
     ui_dirty();
@@ -2622,10 +2638,10 @@ static void on_roles(Resp *r, void *ctx) {
 int guild_roles(u64 gid, const RoleName **out) {
     if (out) *out = RL.r;
     if (RL.gid == gid && RL.loaded) return RL.n;
-    if (RL.gid == gid && RL.busy) return -1;
+    if (RL.gid == gid && RL.busy) { RL.drop = false; return -1; }
     roles_free();
     RL.gid = gid;
-    RL.loaded = false;
+    RL.loaded = RL.drop = false;
     if (O.demo) {
         static const char R[] = "[{\"id\":\"2000\",\"name\":\"@everyone\",\"position\":0},{\"id\":\"2001\",\"name\":\"Админ\",\"color\":15548997,\"position\":3},"
                                 "{\"id\":\"2002\",\"name\":\"Модератор\",\"color\":3447003,\"position\":1},{\"id\":\"2003\",\"name\":\"Участник\",\"color\":5763719,\"position\":2}]";
@@ -2644,10 +2660,17 @@ int guild_roles(u64 gid, const RoleName **out) {
 /* Ревью 6 М3: закрыли формы — кэши ролей, описания и настроек канала не держим. */
 void forms_closed(void) {
     roles_free();
-    RL.gid = 0; RL.loaded = RL.busy = false;
+    RL.gid = 0; RL.loaded = RL.busy = RL.drop = false;
     free(GD.desc); GD.desc = NULL; GD.gid = 0; GD.loaded = GD.busy = false;
     free(CI.name); free(CI.topic); CI.name = CI.topic = NULL;
     CI.cid = 0; CI.loaded = CI.busy = false; CI.failed = 0;
+}
+/* Карточка профиля закрыта: роли её сервера не держим (окно «Права» само зовёт forms_closed). */
+void roles_release(u64 gid) {
+    if (!gid || RL.gid != gid) return;
+    if (RL.busy) { RL.drop = true; return; }    /* ответ ещё в пути: выбросить его по приходу */
+    roles_free();
+    RL.gid = 0; RL.loaded = false;
 }
 const char *role_name(u64 gid, u64 rid) {
     if (RL.gid != gid) return NULL;

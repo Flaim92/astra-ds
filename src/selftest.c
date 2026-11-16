@@ -2613,8 +2613,24 @@ static void t_memlist(void) {
     check(down && on_screen("Админ - 2") && ml_rows_held() <= 300, "список участников (демо): колесо листает, окна подгружаются и отпускаются");
     /* щелчок по участнику — карточка */
     bool card = click("ELDEN RING") && profile_state() && profile_state()->id == 1004;
+    /* большая карточка: вкладки, роли плашками с названиями, общие серверы с ником, Tab, узкое окно */
+    bool tabs = card && on_screen("Обо мне") && on_screen("Общие серверы (3)") && on_screen("Общие друзья (3)");
+    bool rolep = card && on_screen("РОЛИ (1)") && on_screen("o Админ");
+    bool mut = card && click("Общие серверы (3)") && on_screen("Шахматный клуб") && on_screen("ник: Ферзь");
+    key(K_TAB, 0);
+    bool fr = card && on_screen("Ночной Филин") && profile_state()->id == 1004;
+    {
+        Scr s1;
+        scr_take(&s1, 40, 24);                   /* узко: компактная карточка, без выхода за край */
+        scr_free(&s1);
+        scr_take(&s1, 160, 50);
+        scr_free(&s1);
+    }
     key(K_ESC, 0);
+    cur_take();
+    bool rel = !role_name(2000, 2001);           /* карточку закрыли — роли сервера отпущены */
     check(card, "список участников (демо): щелчок по участнику открывает карточку");
+    check(tabs && rolep && mut && fr && rel, "карточка профиля: вкладки, роли с названиями, общие серверы (ник) и друзья, роли освобождаются при закрытии");
     ml_close();
     g_clock_skew = skew0;
     O.demo = demo;
@@ -3616,15 +3632,27 @@ static void t_packb3(void) {
     g_http_guard = NULL; O.demo = true;
     check(c1 && c2 && c3 && c4 && c5 && c6 && c7, "№55 кнопки ботов: разбор (ссылки только https), недоступная, выбор по min/max, POST /interactions, одно нажатие за раз, тайм-аут 5 с");
     ev("MESSAGE_DELETE", "{\"id\":\"882000\",\"channel_id\":\"3004\"}");
-    /* №99 полный профиль */
+    /* №99 полный профиль: общие серверы (с ником на сервере) и друзья — сразу, тем же запросом */
     profile_open_full(1001, 2000);
     const Profile *pf = profile_state();
-    bool p1 = pf->full && pf->nmutual == 1 && pf->mutual[0] == 2000 && pf->nfriends == 1 && pf->friends[0] == 1002 && pf->nconn == 1 && strstr(pf->conn[0], "github");
+    bool p1 = pf->full && pf->nmutual == 3 && pf->mutual[0] == 2000 && pf->mutual[1] == 2500 && pf->nfriends == 3 && pf->friends[0] == 1002 &&
+              pf->nconn == 1 && strstr(pf->conn[0], "github") && pf->mutual_nick && !pf->mutual_nick[0] && pf->mutual_nick[1] &&
+              !strcmp(pf->mutual_nick[1], "Ферзь") && !pf->mutual_nick[2];
     profile_close();
     profile_open(1001, 2000);
-    bool p2 = !profile_state()->full && !profile_state()->nmutual;
+    bool p2 = profile_state()->full && profile_state()->nmutual == 3 && profile_state()->nfriends == 3;
     profile_close();
-    check(p1 && p2, "№99 полный профиль: общие серверы и друзья, привязки — только по profile_open_full, закрытие освобождает");
+    bool p3 = !profile_state()->nmutual && !profile_state()->mutual && !profile_state()->mutual_nick && !profile_state()->friends;
+    check(p1 && p2 && p3, "№99 профиль: общие серверы (и ник на них), друзья и привязки сразу при открытии, закрытие освобождает");
+    /* роли для карточки: освобождаются при закрытии, чужой сервер не трогается */
+    const RoleName *rl0 = NULL;
+    int nr0 = guild_roles(2000, &rl0);
+    bool r1 = nr0 == 4 && role_name(2000, 2001) && !strcmp(role_name(2000, 2001), "Админ");
+    roles_release(2100);
+    bool r2 = role_name(2000, 2001) != NULL;
+    roles_release(2000);
+    bool r3 = role_name(2000, 2001) == NULL;
+    check(r1 && r2 && r3, "карточка профиля: имена ролей сервера по требованию, roles_release освобождает только свой сервер");
     /* №109/111 запросы и группы */
     ev("CHANNEL_CREATE", "{\"id\":\"3700\",\"type\":1,\"recipients\":[{\"id\":\"1007\",\"username\":\"stranger\"}],\"is_message_request\":true,\"last_message_id\":\"9999\"}");
     ev("CHANNEL_CREATE", "{\"id\":\"3701\",\"type\":1,\"recipients\":[{\"id\":\"1008\",\"username\":\"spammer\"}],\"is_spam\":true}");

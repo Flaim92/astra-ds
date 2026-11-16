@@ -343,6 +343,7 @@ typedef struct {
     /* №99 полный профиль (profile_open_full): общие серверы и друзья, привязанные аккаунты */
     bool full;
     int nmutual; const u64 *mutual;             /* id общих серверов */
+    const char *const *mutual_nick;             /* ник на каждом из общих серверов (NULL — нет), параллельно mutual */
     int nfriends; const u64 *friends;           /* id общих друзей (имена — user_name) */
     int nconn; const char *conn[8];             /* «тип: имя» привязанных аккаунтов */
 } Profile;
@@ -689,6 +690,7 @@ const char *guild_description(u64 gid);         /* первый вызов — G
 typedef struct { u64 id; char *name; u32 color; int pos; } RoleName;
 int guild_roles(u64 gid, const RoleName **out);
 const char *role_name(u64 gid, u64 role_id);    /* из загруженного списка; NULL — нет */
+void roles_release(u64 gid);                    /* закрыта карточка профиля: освободить роли gid (если загружены для него) */
 enum { CHK_TEXT = 0, CHK_VOICE = 2, CHK_CATEGORY = 4 };
 bool chan_create(u64 gid, int kind, const char *name, u64 parent_id, char *err, size_t errn);
 typedef struct { const char *name, *topic; int slowmode, nsfw, bitrate, user_limit; } ChanEdit;   /* NULL / -1 — не менять */

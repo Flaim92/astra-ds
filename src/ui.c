@@ -144,7 +144,7 @@ enum {
     B_PINS_MORE, B_INBOX_T0, B_INBOX_T1, B_ACK_ALL, B_EP_X, B_EMOJI, B_CAP_GO, B_CAP_NO,
     B_ADDSRV, B_GMENU, B_GINVITE, B_ADDFRIEND, B_TXT_EXP, B_TXT_DL, B_STARTASK, B_RV_X, B_EPH_HIDE, B_EMBEDS, B_MRETRY, B_MDISCARD,
     B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS, B_NS_OFF, B_NS_SPX, B_NS_RNN, B_WATCH, B_WATCH_STOP, B_WATCH_PICK, B_WATCH_FULL, B_WATCH_CHAT, B_WATCH_SHOW, B_CAM, B_CAM_PV, B_CAM_VIEW, B_CAM_TILE, B_ANON, B_MICG_DN, B_MICG_UP, B_MICG_0, B_HIDECAP, B_WSV_DN, B_WSV_UP, B_WSV_0, B_WSV_MUTE, B_GAME, B_ACT, B_ACT_X, B_ACT_CARD,
-    B_SP_PREV, B_SP_NEXT
+    B_SP_PREV, B_SP_NEXT, B_CARD_TAB, B_CARD_GUILD, B_CARD_FRIEND
 };
 enum { MI_REPLY = 1, MI_EDIT, MI_DELETE, MI_REACT, MI_COPY,
        MI_FX, MI_VADDN, MI_VADUP, MI_HELP, MI_QUIT,             /* меню сообщения и меню настроек */
@@ -280,6 +280,8 @@ static struct {
     /* карточка пользователя (щелчок по @нику, имени, аватару) */
     u64 card_uid;
     int card_x, card_y;
+    int card_tab, card_scroll;                   /* большая карточка: вкладка (0 обо мне, 1 серверы, 2 друзья) и прокрутка списка */
+    u64 card_rgid;                               /* сервер, чьи роли брала карточка: освободить при закрытии */
     u64 bar_msg;                                 /* панель действий при наведении: над каким сообщением */
     bool no_ping;                                /* ответ без упоминания автора («@ ВЫКЛ») */
     bool no_embeds;                              /* следующее сообщение — без превью ссылок */
@@ -6155,7 +6157,7 @@ static void date_short(i64 unix_s, char *out, size_t n) {
     plat_localtime(unix_s, &t);
     snprintf(out, n, TR("%d %s %d г."), t.tm_mday, tr(mon[(t.tm_mon % 12 + 12) % 12]), t.tm_year + 1900);
 }
-static void draw_card(int W, int H) {
+static void draw_card_compact(int W, int H) {
     u64 uid = U.card_uid;
     const Profile *pf = profile_state();
     bool have = pf && pf->id == uid && !pf->busy && !pf->error[0];
@@ -6320,6 +6322,242 @@ static void draw_card(int W, int H) {
         if (!r) x += g_button(x, by, TR("В друзья"), px + bw - 2 - x, 0, B_CARD_ADD) + 1;
         if (!r || r->type != REL_BLOCKED) x += g_button(x, by, TR("Блок"), px + bw - 2 - x, 2, B_CARD_BLOCK) + 1;
         x += g_button(x, by, ignored(uid) ? TR("Не игнор.") : TR("Игнор"), px + bw - 2 - x, 0, B_CARD_IGN) + 1;   /* №108 */
+        const Channel *gc = chan_find(S.open_ch);
+        if (gc && gc->type == CH_GROUP && gdm_owner(gc->id) == S.me_id) x += g_button(x, by, TR("Исключить"), px + bw - 2 - x, 2, B_CARD_KICK) + 1;
+    }
+    if (!streamer_on()) g_button(x, by, "ID", px + bw - 2 - x, 0, B_CARD_ID);
+}
+
+/* Большая карточка профиля (как полный профиль Discord): шапка, вкладки «Обо мне | Общие серверы | Общие друзья».
+ * Роли — плашками с названиями цветом роли: список ролей сервера (guild_roles) грузится, пока открыта карточка,
+ * и освобождается при закрытии (roles_release). Общие серверы и друзья приходят тем же запросом профиля. */
+static bool forms_open(void);
+#define CARD_ROLES_MAX 64
+typedef struct { const char *name; u32 col; int pos; } CardRole;
+static void card_tab_set(int t) { U.card_tab = (t % 3 + 3) % 3; U.card_scroll = 0; U.dirty = true; }
+static void draw_card(int W, int H) {
+    int bw = W - 2 < 64 ? W - 2 : 64, bh = H - 2 < 30 ? H - 2 : 30;
+    if (bw < 48 || bh < 20) { draw_card_compact(W, H); return; }
+    u64 uid = U.card_uid;
+    const Profile *pf = profile_state();
+    bool have = pf && pf->id == uid && !pf->busy && !pf->error[0];
+    bool me = uid == S.me_id;
+    const Channel *mc0 = chan_find(S.open_ch);
+    u64 mgid = mc0 ? mc0->guild_id : 0;
+    bool modrow = mgid && !me && (mod_can(mgid, MOD_TIMEOUT) || mod_can(mgid, MOD_KICK) || mod_can(mgid, MOD_BAN) || mod_can(mgid, MOD_ROLES));
+    const NoteState *ns = note_state();
+    bool noteon = !me && ns && ns->uid == uid;
+    int nnote = 0;
+    char **nl = NULL;
+    if (noteon && !ns->busy && !ns->err[0] && ns->text[0]) { char *nt = san(ns->text, false); nnote = help_wrap(nt, bw - 4, &nl); free(nt); if (nnote > 3) { for (int i = 3; i < nnote; i++) free(nl[i]); nnote = 3; } }
+    int note_rows = !me ? (noteon ? 1 + (nnote ? nnote : 1) : 1) : 0;
+    int px = U.card_x + 2, py = U.card_y - bh / 2;
+    if (px + bw > W - 1) px = U.card_x - bw - 1;
+    if (px < 0) px = 0;
+    if (py + bh > H - 1) py = H - 1 - bh;
+    if (py < 1) py = 1;
+    ovl_cut(px, py, bw, bh);
+    u32 ut = bg_at(px, py), ub = bg_at(px, py + bh - 1);
+    g_rect(px, py, bw, bh, C_MENU);
+    g_rect(px, py, bw, 2, have && pf->accent ? pf->accent : av_color(uid));   /* баннер — цвет профиля */
+    g_round_corners(px, py, bw, bh, 0, ut);
+    g_round_corners(px, py + bh - 1, bw, bh, bh - 1, ub);
+    hit_add(px, py, bw, bh, A_BLOCK, 0, 0, 0);
+    g_text(px + bw - 3, py, "x", 1, C_WHITE, AT_B);
+    hit_add(px + bw - 4, py, 3, 1, A_BTN, B_CARD_X, 0, HV_RED);
+    for (int r = 0; r < 3; r++) { g_avatar(px + 2, py + 1 + r, 6, 3, r, uid, NULL); strip_part(G_POP, px + 2, py + 1 + r, 6, 3, r, PK_AVR, uid); }
+    hit_add(px + 2, py + 1, 6, 3, A_BTN, B_AVBIG, 0, HV_ICON);
+    const char *nm = have && pf->name && *pf->name ? pf->name : me && S.me_name ? S.me_name : user_name(uid);
+    int y = py + 5;
+    int u = g_texte(px + 2, y, nm && *nm ? nm : "?", bw - 10, C_WHITE, AT_B);
+    if (have && pf->bot) { g_pill(px + 3 + u, y, 5, C_ACC); g_text(px + 4 + u, y, "BOT", 3, C_WHITE, AT_B); }
+    y++;
+    char t[200];
+    if (have && pf->username && *pf->username) {
+        snprintf(t, sizeof t, "%s%s%s", pf->username, pf->pronouns && *pf->pronouns ? "  " : "", pf->pronouns ? pf->pronouns : "");
+        g_texte(px + 2, y, t, bw - 4, C_TEXT, 0);
+    }
+    y++;
+    const Relation *r = rel_find(uid);
+    const char *rel = me ? TR("это вы") : !r ? "" : r->type == REL_FRIEND ? TR("друг") : r->type == REL_IN ? TR("входящая заявка в друзья") :
+                      r->type == REL_OUT ? TR("исходящая заявка в друзья") : TR("заблокирован");
+    snprintf(t, sizeof t, "%s%s%s", rel, *rel && r && r->type == REL_FRIEND ? " - " : "", r && r->type == REL_FRIEND ? status_text(r) : "");
+    if (r && r->type == REL_FRIEND) g_ch(px + 2, y, 'o', status_col(r->status), AT_B);
+    g_texte(px + (r && r->type == REL_FRIEND ? 4 : 2), y, t, bw - 6, C_MUTED, 0);
+    y += 2;
+    /* вкладки: выбранная — белым и полосой акцента под ней */
+    int nmu = have ? pf->nmutual : 0, nfr = have ? pf->nfriends : 0;
+    if (me) U.card_tab = 0;                      /* у себя общих нет */
+    int tx = px + 2;
+    for (int k = 0; k < (me ? 1 : 3); k++) {
+        if (k == 0) snprintf(t, sizeof t, "%s", TR("Обо мне"));
+        else if (k == 1) snprintf(t, sizeof t, TR("Общие серверы (%d)"), nmu);
+        else snprintf(t, sizeof t, TR("Общие друзья (%d)"), nfr);
+        int tw = vw(t);
+        if (tx + tw > px + bw - 2) break;
+        bool on = U.card_tab == k;
+        g_text(tx, y, t, tw, on ? C_WHITE : C_MUTED, on ? AT_B : 0);
+        for (int i = 0; i < tw; i++) g_ch(tx + i, y + 1, on ? '=' : '-', on ? C_ACC : 0x3f4147u, 0);
+        hit_add(tx, y, tw, 1, A_BTN, B_CARD_TAB, k, HV_UL);
+        tx += tw;
+        for (int i = 0; i < 3 && tx < px + bw - 2; i++, tx++) g_ch(tx, y + 1, '-', 0x3f4147u, 0);
+    }
+    for (; tx < px + bw - 2; tx++) g_ch(tx, y + 1, '-', 0x3f4147u, 0);
+    y += 3;
+    int by = py + bh - 2;                        /* строка кнопок */
+    int ye = by - (modrow ? 2 : 0) - note_rows - 1;   /* содержимое вкладки — строки [y, ye) */
+    int cw = bw - 4;
+    if (pf && pf->id == uid && pf->busy) { if (y < ye) g_text(px + 2, y++, TR("загрузка профиля..."), cw, C_MUTED, 0); }
+    else if (pf && pf->id == uid && pf->error[0]) { char *e = san(pf->error, false); if (y < ye) g_texte(px + 2, y++, e, cw, C_RED, 0); free(e); }
+    if (U.card_tab == 0) {
+        if (have && pf->bio && *pf->bio) {
+            char **bio = NULL;
+            char *b = san(pf->bio, false);
+            int nbio = help_wrap(b, cw, &bio);
+            free(b);
+            if (y < ye) g_text(px + 2, y++, TR("О СЕБЕ"), cw, C_WHITE, AT_B);
+            for (int i = 0; i < nbio; i++) { if (i < 6 && y < ye) g_text(px + 2, y++, bio[i], cw, C_TEXT, 0); free(bio[i]); }
+            free(bio);
+            y++;
+        }
+        char d1[40], d2[40] = "";
+        date_short((i64)((uid >> 22) + (u64)DISCORD_EPOCH_MS) / 1000, d1, sizeof d1);
+        if (have && pf->member_since_unix > 0) date_short(pf->member_since_unix, d2, sizeof d2);
+        snprintf(t, sizeof t, TR("В DISCORD С  %s"), d1);
+        if (y < ye) g_texte(px + 2, y++, t, cw, C_MUTED, AT_B);
+        if (d2[0] && y < ye) { snprintf(t, sizeof t, TR("НА СЕРВЕРЕ С  %s"), d2); g_texte(px + 2, y++, t, cw, C_MUTED, AT_B); }
+        if (have && pf->nroles && y + 1 < ye) {
+            y++;
+            Guild *g = guild_find(pf->guild_id);
+            const RoleName *rl = NULL;
+            int nrl = -1;
+            if (!forms_open()) { nrl = guild_roles(pf->guild_id, &rl); U.card_rgid = pf->guild_id; }   /* окно «Права» держит свои роли — не сбивать */
+            CardRole cr[CARD_ROLES_MAX];
+            int ncr = 0;
+            for (int i = 0; i < pf->nroles && ncr < CARD_ROLES_MAX; i++) {
+                CardRole c = { NULL, 0, 0 };
+                for (int k = 0; g && k < g->nroles; k++) if (g->roles[k].id == pf->roles[i]) { c.col = g->roles[k].color; c.pos = g->roles[k].pos; }
+                for (int k = 0; nrl > 0 && k < nrl; k++) if (rl[k].id == pf->roles[i]) { c.name = rl[k].name; if (!c.col) c.col = rl[k].color; }
+                if (!c.name) c.name = role_name(pf->guild_id, pf->roles[i]);
+                int at = ncr++;                  /* по месту в иерархии: старшие роли первыми */
+                while (at > 0 && cr[at - 1].pos < c.pos) { cr[at] = cr[at - 1]; at--; }
+                cr[at] = c;
+            }
+            snprintf(t, sizeof t, TR("РОЛИ (%d)"), pf->nroles);
+            int hx = px + 2 + g_text(px + 2, y, t, cw, C_WHITE, AT_B);
+            if (nrl < 0 && !forms_open()) g_text(hx + 2, y, TR("загрузка ролей..."), px + bw - 2 - hx - 2, C_MUTED, 0);
+            y++;
+            int x = px + 2;
+            for (int i = 0; i < ncr; i++) {
+                const char *rn = cr[i].name;
+                if (!rn) {                       /* имени нет (ещё грузится или ошибка) — точка цвета роли */
+                    if (x + 2 > px + bw - 2) { x = px + 2; y++; }
+                    if (y >= ye) break;
+                    g_ch(x, y, 'o', cr[i].col ? cr[i].col : C_MUTED, AT_B);
+                    x += 2;
+                    continue;
+                }
+                int w = vw(rn) + 4;
+                if (w > cw) w = cw;
+                if (x > px + 2 && x + w > px + bw - 2) { x = px + 2; y++; }
+                if (y >= ye || (y == ye - 1 && i + 1 < ncr && x + w + 4 > px + bw - 2)) {   /* не влезает: «+N» */
+                    if (y >= ye) y = ye - 1;
+                    snprintf(t, sizeof t, "+%d", ncr - i);
+                    g_rect(px + bw - 3 - vw(t), y, vw(t) + 1, 1, C_MENU);
+                    g_text(px + bw - 2 - vw(t), y, t, vw(t), C_MUTED, AT_B);
+                    break;
+                }
+                g_pill(x, y, w, C_BTN2);
+                g_ch(x + 1, y, 'o', cr[i].col ? cr[i].col : C_MUTED, AT_B);
+                g_texte(x + 3, y, rn, w - 4, C_TEXT, 0);
+                x += w + 1;
+            }
+            y++;
+        }
+        if (have && pf->nconn && y + 1 < ye) {
+            y++;
+            if (streamer_on()) g_text(px + 2, y++, TR("связи скрыты (режим стримера)"), cw, C_MUTED, 0);
+            else {
+                g_text(px + 2, y++, TR("СВЯЗИ"), cw, C_WHITE, AT_B);
+                for (int i = 0; i < pf->nconn && i < 4 && y < ye; i++) { char *c2 = san(pf->conn[i] ? pf->conn[i] : "", false); g_texte(px + 2, y++, c2, cw, C_TEXT, 0); free(c2); }
+            }
+        }
+    } else if (have) {
+        int n = U.card_tab == 1 ? nmu : nfr, rows = ye - y;
+        if (streamer_on()) { g_text(px + 2, y, TR("общие скрыты (режим стримера)"), cw, C_MUTED, 0); n = 0; }
+        else if (!n) g_text(px + 2, y, U.card_tab == 1 ? TR("Общих серверов нет") : TR("Общих друзей нет"), cw, C_MUTED, 0);
+        if (U.card_scroll > n - rows) U.card_scroll = n - rows;
+        if (U.card_scroll < 0) U.card_scroll = 0;
+        for (int i = U.card_scroll; i < n && y < ye; i++, y++) {
+            if (U.card_tab == 1) {
+                u64 gid = pf->mutual[i];
+                Guild *gg = guild_find(gid);
+                const char *gn = gg && gg->name && *gg->name ? gg->name : "?";
+                int cl = 1;                      /* первая буква названия (UTF-8) на плашке цвета сервера */
+                while (gn[cl] && ((unsigned char)gn[cl] & 0xC0) == 0x80) cl++;
+                g_pill(px + 2, y, 4, av_color(gid));
+                g_textn(px + 3, y, gn, (size_t)cl, 2, C_WHITE, AT_B);
+                int w0 = g_texte(px + 7, y, gn, cw - 5, C_TEXT, AT_B);
+                const char *nk = pf->mutual_nick ? pf->mutual_nick[i] : NULL;
+                if (nk && *nk && px + 9 + w0 < px + bw - 2) { snprintf(t, sizeof t, TR("ник: %s"), nk); g_texte(px + 9 + w0, y, t, px + bw - 2 - (px + 9 + w0), C_MUTED, 0); }
+                hit_add(px + 1, y, bw - 2, 1, A_BTN, B_CARD_GUILD, i, HV_BG);
+            } else {
+                u64 fid = pf->friends[i];
+                g_listav(px + 2, y, fid, NULL, G_POP);
+                int w0 = g_texte(px + 7, y, user_name(fid), cw - 5, C_TEXT, AT_B);
+                const Relation *fr = rel_find(fid);
+                if (fr && fr->type == REL_FRIEND && px + 9 + w0 + 2 < px + bw - 2) {
+                    g_ch(px + 9 + w0, y, 'o', status_col(fr->status), AT_B);
+                    g_texte(px + 11 + w0, y, status_text(fr), px + bw - 2 - (px + 11 + w0), C_MUTED, 0);
+                }
+                hit_add(px + 1, y, bw - 2, 1, A_BTN, B_CARD_FRIEND, i, HV_BG);
+            }
+        }
+        if (n > rows && rows > 0) {              /* есть ещё — подсказка про колесо */
+            snprintf(t, sizeof t, "%d-%d / %d", U.card_scroll + 1, U.card_scroll + rows < n ? U.card_scroll + rows : n, n);
+            g_text(px + bw - 2 - vw(t), ye, t, vw(t), C_MUTED, 0);
+        }
+    }
+    int x = px + 2;
+    if (!me) {                                   /* №100: заметка (только мне видна) */
+        int ny0 = by - (modrow ? 2 : 0) - note_rows;
+        if (!noteon) {
+            int w0 = g_text(px + 2, ny0, TR("> Личная заметка"), cw, C_URL, 0);
+            hit_add(px + 2, ny0, w0, 1, A_BTN, B_CARD_NOTE, 0, HV_UL);
+        } else {
+            int u2 = g_text(px + 2, ny0, TR("ЗАМЕТКА (видна только вам) "), cw, C_MUTED, AT_B);
+            g_text(px + 2 + u2, ny0, TR("[изменить]"), cw - u2, C_URL, 0);
+            hit_add(px + 2 + u2, ny0, 10, 1, A_BTN, B_NOTE_EDIT, 0, HV_UL);
+            if (ns->busy) g_text(px + 2, ny0 + 1, TR("загрузка..."), cw, C_MUTED, 0);
+            else if (ns->err[0]) { char *e = san(ns->err, false); g_texte(px + 2, ny0 + 1, e, cw, C_RED, 0); free(e); }
+            else if (!nnote) g_text(px + 2, ny0 + 1, TR("пусто"), cw, C_MUTED, 0);
+            for (int i = 0; i < nnote; i++) g_text(px + 2, ny0 + 1 + i, nl[i], cw, C_TEXT, 0);
+        }
+    }
+    for (int i = 0; i < nnote; i++) free(nl[i]);
+    free(nl);
+    if (modrow) {                                /* модерация — как в компактной карточке */
+        int my = by - 2, mx = px + 2;
+        static const char *const ml[] = { "Тайм-аут", "Выгнать", "Бан", "Роли", "Перенести", "Заглушить" };
+        bool invoice = false;
+        const VoiceState *vl[32];
+        for (int i = 0; i < S.nchans && !invoice; i++) if (S.chans[i].guild_id == mgid && is_voice(&S.chans[i])) {
+            int kk = voice_members(S.chans[i].id, vl, 32);
+            for (int q = 0; q < kk; q++) if (vl[q]->user_id == uid) invoice = true;
+        }
+        for (int a2 = 0; a2 < 6; a2++) {
+            if (!mod_can(mgid, a2) || (a2 >= MOD_MOVE && !invoice)) continue;
+            int bw2 = g_button(mx, my, tr(ml[a2]), px + bw - 2 - mx, a2 == MOD_BAN || a2 == MOD_KICK ? 2 : 0, B_MOD);
+            if (!bw2) break;
+            U.hit[U.nhit - 1].arg = a2;
+            mx += bw2 + 1;
+        }
+    }
+    if (!me) {
+        x += g_button(x, by, TR("Написать"), cw, 1, B_CARD_MSG) + 1;
+        if (!r) x += g_button(x, by, TR("В друзья"), px + bw - 2 - x, 0, B_CARD_ADD) + 1;
+        if (!r || r->type != REL_BLOCKED) x += g_button(x, by, TR("Блок"), px + bw - 2 - x, 2, B_CARD_BLOCK) + 1;
+        x += g_button(x, by, ignored(uid) ? TR("Не игнор.") : TR("Игнор"), px + bw - 2 - x, 0, B_CARD_IGN) + 1;
         const Channel *gc = chan_find(S.open_ch);
         if (gc && gc->type == CH_GROUP && gdm_owner(gc->id) == S.me_id) x += g_button(x, by, TR("Исключить"), px + bw - 2 - x, 2, B_CARD_KICK) + 1;
     }
@@ -6915,6 +7153,7 @@ static struct {
     char tgn[24][64];
     const char *tgp[24];
 } FM;
+static bool forms_open(void) { return FM.id != 0; }
 static const char *const AGE_N[] = { "30 минут", "1 час", "6 часов", "12 часов", "1 день", "7 дней", "никогда" };
 static const int AGE_S[] = { 1800, 3600, 21600, 43200, 86400, 604800, 0 };
 static const char *const USES_N[] = { "без ограничений", "1", "5", "10", "25", "50", "100" };
@@ -9349,7 +9588,7 @@ enum { B_LG_VCHECK = 200, B_LG_VSKIP, B_LG_LOGIN, B_LG_FORGOT, B_LG_REGISTER, B_
        B_LG_CODE, B_LG_SMS, B_LG_BACKUP, B_LG_TOTP, B_LG_RETRY, B_LG_RESTART, B_LG_QRDEMO, B_LG_QRNEW, B_LG_UNDEL,
        B_LG_SMSAGAIN, B_LG_CAPOPEN, B_LG_CAPCANCEL, B_LG_NOASK, B_LG_VRETRY, B_LG_VQUIT, B_LG_ACCBACK };
 /* кнопки входа и общие B_* — одна таблица щелчков (Hit.sub — u8): номера не должны пересекаться */
-_Static_assert((int)B_SP_NEXT < (int)B_LG_VCHECK, "B_* дошли до B_LG_*: поднимите B_LG_VCHECK");
+_Static_assert((int)B_CARD_FRIEND < (int)B_LG_VCHECK, "B_* дошли до B_LG_*: поднимите B_LG_VCHECK");
 _Static_assert(B_LG_ACCBACK < 256, "B_LG_* не влезают в Hit.sub (u8)");
 #define C_LINK 0x4ea8deu
 static struct {
@@ -10309,6 +10548,7 @@ static void draw_captcha(int W, int H) {
 }
 static void render(void) {
     int W, H;
+    if (!U.card_uid && U.card_rgid) { if (!forms_open()) roles_release(U.card_rgid); U.card_rgid = 0; }   /* карточка закрыта — её роли не держим */
     if (snap_out) { W = snap_w; H = snap_h; } else term_size(&W, &H);
     if (W < 1) W = 1;
     if (H < 1) H = 1;
@@ -10734,6 +10974,7 @@ static void user_card(u64 uid, int x, int y) {
     U.card_uid = uid;
     U.card_x = x;
     U.card_y = y;
+    U.card_tab = U.card_scroll = 0;
     U.menu = U.pick = false;
     Channel *c = chan_find(S.open_ch);
     profile_open(uid, c ? c->guild_id : 0);     /* о себе, местоимения, даты — по щелчку, без кэша */
@@ -11452,6 +11693,12 @@ static void cancel_mode(void) {
 /* ---- мышь ---- */
 static void wheel(int x, int y, bool up) {
     if (U.menu) { U.menu = false; return; }
+    if (U.card_uid && U.card_tab && !U.help && !U.settings) {   /* карточка: прокрутка общих серверов/друзей */
+        U.card_scroll += up ? -3 : 3;
+        if (U.card_scroll < 0) U.card_scroll = 0;
+        U.dirty = true;
+        return;
+    }
     switch (hit_area(x, y)) {
     case A_AR_HELP: U.help_scroll += up ? -3 : 3; if (U.help_scroll < 0) U.help_scroll = 0; break;
     case A_AR_RAIL: U.guild_free = true; U.guild_scroll += up ? -1 : 1; break;
@@ -11499,6 +11746,20 @@ static void button(int id, int x, int y) {
     case B_PICK_GO: pick_go(); break;
     case B_PICK_X: U.pick = false; break;
     case B_CARD_X: U.card_uid = 0; profile_close(); break;
+    case B_CARD_TAB: card_tab_set(U.btn_arg); break;
+    case B_CARD_GUILD: {                         /* общий сервер: закрыть карточку и открыть его */
+        const Profile *pf = profile_state();
+        u64 gid = pf && U.btn_arg >= 0 && U.btn_arg < pf->nmutual ? pf->mutual[U.btn_arg] : 0;
+        U.card_uid = 0; profile_close();
+        if (gid) goto_guild(gid);
+        break;
+    }
+    case B_CARD_FRIEND: {                        /* общий друг: его карточка на том же месте */
+        const Profile *pf = profile_state();
+        u64 fid = pf && U.btn_arg >= 0 && U.btn_arg < pf->nfriends ? pf->friends[U.btn_arg] : 0;
+        if (fid) user_card(fid, U.card_x, U.card_y);
+        break;
+    }
     case B_PING: U.no_ping = !U.no_ping; break;
     case B_ADDSRV: fm_open(FM_ADDSRV, 0, 0); break;
     case B_EMBEDS: U.no_embeds = !U.no_embeds; break;
@@ -11828,7 +12089,7 @@ static void mouse(const Key *k) {
     }
     if (U.card_uid && !U.help && !U.settings) {  /* карточка пользователя: её кнопки; щелчок мимо — закрыть */
         if (h && k->button == 1 && h->act == A_BTN && (h->sub == B_CARD_MSG || h->sub == B_CARD_ID || h->sub == B_CARD_X || h->sub == B_CARD_BLOCK || h->sub == B_CARD_ADD || h->sub == B_CARD_KICK || h->sub == B_CARD_FULL || h->sub == B_AVBIG || h->sub == B_CARD_IGN || h->sub == B_CARD_NOTE || h->sub == B_NOTE_EDIT)) button(h->sub, h->x, h->y);
-        else if (h && k->button == 1 && h->act == A_BTN && h->sub == B_MOD) { U.btn_arg = h->arg; button(B_MOD, h->x, h->y); }
+        else if (h && k->button == 1 && h->act == A_BTN && (h->sub == B_MOD || h->sub == B_CARD_TAB || h->sub == B_CARD_GUILD || h->sub == B_CARD_FRIEND)) { U.btn_arg = h->arg; button(h->sub, h->x, h->y); }
         else { U.card_uid = 0; profile_close(); }
         return;
     }
@@ -12116,6 +12377,8 @@ static void handle_key(const Key *k) {
     if (U.card_uid && !U.help && !U.settings) {
         U.dirty = true;
         if (k->code == K_ENTER) { button(B_CARD_MSG, 0, 0); return; }
+        if (k->code == K_TAB || k->code == K_BTAB) { if (U.card_uid != S.me_id) card_tab_set(U.card_tab + (k->code == K_TAB ? 1 : -1)); return; }
+        if (k->code == K_UP || k->code == K_DOWN) { U.card_scroll += k->code == K_UP ? -1 : 1; if (U.card_scroll < 0) U.card_scroll = 0; return; }
         U.card_uid = 0; profile_close();
         if (k->code == K_ESC) return;
     }

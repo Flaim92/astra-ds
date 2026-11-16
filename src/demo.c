@@ -391,7 +391,8 @@ void demo_profile(u64 uid, u64 guild_id) {
     else buf_puts(&b, "},\"user_profile\":{}");
     if (guild_id) buf_printf(&b, ",\"guild_member\":{\"nick\":null,\"roles\":[\"2001\"],\"joined_at\":\"2021-03-04T05:06:07+00:00\"}");
     /* №99: общие серверы/друзья и привязки (используются только в полном профиле) */
-    buf_puts(&b, ",\"mutual_guilds\":[{\"id\":\"2000\"}],\"mutual_friends\":[{\"id\":\"1002\",\"username\":\"bob\",\"global_name\":\"Боб\"}],"
+    buf_puts(&b, ",\"mutual_guilds\":[{\"id\":\"2000\"},{\"id\":\"2500\",\"nick\":\"Ферзь\"},{\"id\":\"2700\",\"nick\":null}],"
+                 "\"mutual_friends\":[{\"id\":\"1002\",\"username\":\"bob\",\"global_name\":\"Боб\"},{\"id\":\"1004\",\"username\":\"filin\",\"global_name\":\"Ночной Филин\"},{\"id\":\"1005\",\"username\":\"mira\",\"global_name\":\"Мира\"}],"
                  "\"connected_accounts\":[{\"type\":\"github\",\"name\":\"alice-dev\"}]");
     buf_puts(&b, "}");
     cJSON *j = json_parse(b.p, b.len);
