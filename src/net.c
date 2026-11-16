@@ -339,6 +339,7 @@ static Req *req_new(const char *method, const char *path, const char *body, Http
         return NULL;
     }
     Req *r = xcalloc(1, sizeof *r);
+    r->r.body.pg_ok = true;                     /* ответ от 32 КБ (история, списки) — страницами, мимо кучи */
     snprintf(r->method, sizeof r->method, "%s", method);
     r->path = xstrdup(path);
     r->body = body ? xstrdup(body) : NULL;
@@ -635,6 +636,7 @@ static void cap_done(Req *r) { if (CP.r == r && !CS.pending) cap_clear(); }
 /* --selftest: подставной ответ 400 с капчей на запрос (без сети); cb получит ответ при отмене. */
 void net_captcha_test(const char *method, const char *path, const char *resp, HttpCb cb, void *ctx) {
     Req *r = xcalloc(1, sizeof *r);
+    r->r.body.pg_ok = true;                     /* ответ от 32 КБ (история, списки) — страницами, мимо кучи */
     snprintf(r->method, sizeof r->method, "%s", method);
     r->path = xstrdup(path);
     r->cb = cb;
@@ -1284,6 +1286,7 @@ static void gw_connecting(void) {
     if (sock == CURL_SOCKET_BAD) { schedule_retry(ui_tr("нет сокета")); return; }
     G.sw = sockwait_new((intptr_t)sock);
     memset(&G.z, 0, sizeof G.z);
+    G.text.pg_ok = true;                        /* распакованные пакеты от 32 КБ — страницами мимо кучи */
     if (inflateInit(&G.z) != Z_OK) { schedule_retry("zlib"); return; }
     G.z_ok = true;
     G.st = GW_LIVE;
@@ -1464,10 +1467,14 @@ void gw_service(void) {
         if (G.frame.cap - G.frame.len < CHUNK + 1) {
             size_t c = G.frame.cap ? G.frame.cap : CHUNK * 2;
             while (c - G.frame.len < CHUNK + 1) c *= 2;
-            char *q = xmalloc(c);
-            if (G.frame.p) { memcpy(q, G.frame.p, G.frame.len); wipe(G.frame.p, G.frame.cap); free(G.frame.p); }
+            c = (c + 4095) & ~(size_t)4095;     /* от 32 КБ — страницами мимо кучи (как Buf с pg_ok) */
+            char *q = g_pg_off ? NULL : plat_pages(c);
+            bool pg = q != NULL;
+            if (!q) q = xmalloc(c);
+            if (G.frame.p) { memcpy(q, G.frame.p, G.frame.len); size_t keep = G.frame.len; if (!G.frame.pg) wipe(G.frame.p, G.frame.cap); buf_free(&G.frame); G.frame.len = keep; }
             G.frame.p = q;
             G.frame.cap = c;
+            G.frame.pg = pg;
         }
         char *dst = G.frame.p + G.frame.len;
         size_t got = 0;
@@ -1554,6 +1561,17 @@ void gw_voice_state(u64 guild, u64 channel, bool mute, bool deaf) {
     gw_send(b);
 }
 
+/* Выгрузка памяти: простаивающие соединения REST (кэш соединений curl и их TLS) — системе. Только когда
+ * ничего не идёт; следующий запрос откроет соединение заново. Шлюз (G.wm) не трогаем: сообщения идут дальше. */
+bool http_active(void) { return q_active || q_head || UP.r || CP.r; }
+bool http_release_idle(void) {
+    if (q_active || q_head || UP.r || CP.r) return false;
+    if (UP.m) { curl_multi_cleanup(UP.m); UP.m = NULL; }
+    if (!g_multi) return false;
+    curl_multi_cleanup(g_multi);
+    g_multi = NULL;
+    return true;
+}
 void net_cleanup(void) {
     gw_stop();
     while (q_head) { Req *r = q_head; q_head = r->next; free_req(r); }

@@ -25,20 +25,30 @@ char *xstrdup(const char *s) {
 void wipe(void *p, size_t n) { plat_wipe(p, n); }
 
 /* ---------- Buf ---------- */
+bool g_pg_off;
+static void buf_release(Buf *b) {
+    if (!b->p) return;
+    if (b->pg) { wipe(b->p, b->cap); plat_pages_free(b->p, b->cap); }
+    else free(b->p);
+}
 void buf_put(Buf *b, const void *s, size_t n) {
     if (b->len + n + 1 > b->cap) {
         size_t c = b->cap ? b->cap : 64;
         while (c < b->len + n + 1) c *= 2;
         /* не realloc: старый блок мог хранить секрет (пароль, ссылку vless, конфиг туннеля) —
          * копируем, затираем и только потом освобождаем (SECURITY.md Б1) */
-        char *q = xmalloc(c);
+        bool pg = b->pg_ok && !g_pg_off && c >= BUF_PG_MIN;   /* крупный блок — страницами мимо кучи */
+        if (pg) c = (c + 4095) & ~(size_t)4095;
+        char *q = pg ? plat_pages(c) : NULL;
+        if (!q) { pg = false; q = xmalloc(c); }
         if (b->p) {
             memcpy(q, b->p, b->len + 1);
-            wipe(b->p, b->cap);
-            free(b->p);
+            if (!b->pg) wipe(b->p, b->cap);
+            buf_release(b);
         }
         b->p = q;
         b->cap = c;
+        b->pg = pg;
     }
     if (n) memcpy(b->p + b->len, s, n);
     b->len += n;
@@ -77,7 +87,7 @@ void buf_json_str(Buf *b, const char *s) {
     }
     buf_put(b, "\"", 1);
 }
-void buf_free(Buf *b) { free(b->p); b->p = NULL; b->len = b->cap = 0; }
+void buf_free(Buf *b) { buf_release(b); b->p = NULL; b->len = b->cap = 0; b->pg = false; }   /* pg_ok остаётся: буфер можно наполнять снова */
 void buf_wipe(Buf *b) { wipe(b->p, b->cap); buf_free(b); }
 
 /* ---------- время ---------- */

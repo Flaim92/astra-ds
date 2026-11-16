@@ -1540,6 +1540,7 @@ void mentions_open(void) {
 #define ACK_GAP 3000
 static struct { u64 ch, pend; i64 at; } AK[ACK_SLOTS];
 __attribute__((weak)) bool win_focused(void) { return true; }
+__attribute__((weak)) bool win_active(void) { return true; }
 static void ack_post(u64 ch, u64 msg, bool manual) {
     char path[112], body[96];
     snprintf(path, sizeof path, "/channels/%llu/messages/%llu/ack", (unsigned long long)ch, (unsigned long long)msg);
@@ -1990,6 +1991,41 @@ static char **pf_mut_nick;                      /* ники на общих се
 static char *pf_conn[8];
 static bool pf_full;
 static unsigned pf_gen;
+/* ---------- разбор памяти модели (замеры, ничего не меняет) ---------- */
+#define MB_OVH 16u                              /* накладные расходы кучи на одно выделение (Windows LFH, x64) */
+static size_t mb_str(const char *s, int *na) { if (!s) return 0; (*na)++; return strlen(s) + 1 + MB_OVH; }
+void store_mem_breakdown(MemBreak *m) {
+    memset(m, 0, sizeof *m);
+    int na = 0;
+    m->guilds = (size_t)S.nguilds * sizeof(Guild) + (S.nguilds ? MB_OVH : 0);
+    for (int i = 0; i < S.nguilds; i++) {
+        const Guild *g = &S.guilds[i];
+        m->guilds += mb_str(g->name, &na);
+        if (g->nmy) { m->guilds += (size_t)g->nmy * sizeof(u64) + MB_OVH; na++; }
+        if (g->nroles) { m->roles += (size_t)g->nroles * sizeof(Role) + MB_OVH; na++; }
+        for (int k = 0; k < g->nroles; k++) m->roles += mb_str(g->roles[k].name, &na);
+        m->nroles += g->nroles;
+    }
+    m->chans = (size_t)S.capchans * sizeof(Channel) + MB_OVH;
+    m->nchans = S.nchans;
+    for (int i = 0; i < S.nchans; i++) {
+        const Channel *c = &S.chans[i];
+        m->chan_str += mb_str(c->name, &na) + mb_str(c->topic, &na);
+        if (c->nrecip) { m->chan_str += (size_t)c->nrecip * sizeof(u64) + MB_OVH; na++; }
+        if (c->now_) { m->ow += (size_t)c->now_ * sizeof(Overwrite) + MB_OVH; na++; m->now_ += c->now_; }
+    }
+    m->users = (size_t)S.capusers * sizeof(User) + MB_OVH;
+    m->nusers = S.nusers;
+    for (int i = 0; i < S.nusers; i++) m->user_str += mb_str(S.users[i].name, &na);
+    m->msgs = (size_t)S.capmsgs * sizeof(Message);
+    for (int i = 0; i < S.nmsgs; i++) {
+        const Message *ms = &S.msgs[i];
+        m->msgs += mb_str(ms->author, &na) + mb_str(ms->content, &na) + mb_str(ms->ref_author, &na) + mb_str(ms->ref_text, &na) + mb_str(ms->raw, &na);
+    }
+    m->rels = (size_t)S.caprels * sizeof(Relation) + MB_OVH;
+    for (int i = 0; i < S.nrels; i++) m->rels += mb_str(S.rels[i].act, &na);
+    m->nalloc = na;
+}
 const Profile *profile_state(void) { return &PF; }
 void profile_close(void) {
     for (int i = 0; i < 4; i++) { free(pf_s[i]); pf_s[i] = NULL; }

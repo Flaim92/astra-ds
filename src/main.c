@@ -452,6 +452,8 @@ static void relogin_step(void);
 static i64 g_trim_at;
 static bool g_trim_ram;                          /* после звонка: ещё и рабочий набор */
 void app_trim_soon(void) { g_trim_at = now_ms() + TRIM_DELAY_MS; }
+/* Выгрузка памяти (ui.c): сжать кучу через ms (0 — в ближайший оборот), ram — ещё и рабочий набор. */
+void app_trim_in(int ms, bool ram) { g_trim_at = now_ms() + (ms > 0 ? ms : 1); if (ram) g_trim_ram = true; }
 void app_trim_after_call(void) { g_trim_ram = true; g_trim_at = now_ms() + TRIM_DELAY_MS; }
 static void trim_step(void) {
     if (!g_trim_at || now_ms() < g_trim_at) return;
@@ -606,10 +608,11 @@ static void relogin_step(void) {
  *   size:ШxВ              — размер сетки в клетках (по умолчанию 110x34)
  *   wait:МС               — прокрутить цикл событий МС миллисекунд (таймеры интерфейса)
  *   snap                  — промежуточный снимок ФАЙЛ-1.bmp, ФАЙЛ-2.bmp, ...
+ *   perf                  — открыть «Настройки -> Производительность» (замеры памяти; разрешено и без --demo)
  *   fine:X:Y:Ш:В          — тестовый слой мелкой сетки (K=4, градиент и ASCII) в клетках X,Y,ШxВ
  * Итоговый снимок — в ФАЙЛ после всех шагов. Файл пишется только по этому явному флагу.
  * Без --demo (живой аккаунт, токен только из хранилища) — только просмотр: разрешены wait, size, snap,
- * fine, hover, wheelup/wheeldown, up/down/left/right/home/end/pgup/pgdn/tab/btab/esc/enter/f1;
+ * fine, hover, wheelup/wheeldown, up/down/left/right/home/end/pgup/pgdn/tab/btab/esc/enter/f1, perf;
  * набор текста, сочетания, щелчки и прочие клавиши (голос F2..F12, удаление) отклоняются. */
 static int exit_rc;
 static bool shot_text;                          /* --shot-text: рядом со снимком .txt — текст сетки (стенд тестировщика) */
@@ -693,7 +696,7 @@ static void shot_fine(int x, int y, int w, int h) {
 /* Живой аккаунт: только шаги просмотра. */
 static bool shot_safe(const char *t) {
     static const char *const ok[] = { "up", "down", "left", "right", "home", "end", "pgup", "pgdn", "tab", "btab",
-                                      "esc", "enter", "f1", "snap" };
+                                      "esc", "enter", "f1", "snap", "perf" };   /* perf — «Производительность» (просмотр) */
     for (size_t i = 0; i < sizeof ok / sizeof *ok; i++) if (!strcmp(t, ok[i])) return true;
     static const char *const pre[] = { "wait:", "size:", "fine:", "hover:", "wheelup:", "wheeldown:" };
     for (size_t i = 0; i < sizeof pre / sizeof *pre; i++) if (!strncmp(t, pre[i], strlen(pre[i]))) return true;
@@ -714,6 +717,7 @@ static bool shot_step(const char *t, const char *path, int *snaps) {
         shot_spin(0);
         return true;
     }
+    if (!strcmp(t, "perf")) { ui_shot_perf(); shot_spin(50); return true; }   /* замеры: открыть «Настройки -> Производительность» */
     if (!strcmp(t, "snap")) {
         char p[512];
         const char *dot = strrchr(path, '.');

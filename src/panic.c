@@ -167,6 +167,7 @@ void panic_now(void) {
     keyring_delete("game");                     /* «показывать игру» */
     keyring_delete("invite-risk-ok");           /* согласие с предупреждением о вступлении */
     keyring_delete("active-now");               /* «Активно сейчас» */
+    keyring_delete("mem-unload");               /* выгрузка памяти: уровни */
     keyring_delete("upd_told");                 /* разовое уведомление об автопроверке */
 #ifdef _WIN32
     TerminateProcess(GetCurrentProcess(), 0);

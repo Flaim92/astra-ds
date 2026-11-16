@@ -871,6 +871,10 @@ static struct {
     bool over;
 } D;
 
+/* Буфер загрузки: от 32 КБ (превью вложений) — страницами мимо кучи, сразу назад системе; вид блока — по его размеру. */
+static bool dl_pg(size_t c) { return c >= BUF_PG_MIN && !g_pg_off; }
+static u8 *dl_alloc(size_t c) { return dl_pg(c) ? plat_pages(c) : malloc(c); }
+static void dl_release(u8 *b, size_t c) { if (!b) return; wipe(b, c); if (dl_pg(c)) plat_pages_free(b, c); else free(b); }
 static size_t dl_write(char *p, size_t sz, size_t n, void *ud) {
     (void)ud;
     size_t t = sz * n;
@@ -879,10 +883,10 @@ static size_t dl_write(char *p, size_t sz, size_t n, void *ud) {
         size_t c = D.cap ? D.cap : 4096;
         while (c < D.len + t) c *= 2;
         if (c > DL_MAX) c = DL_MAX;
-        u8 *nb = malloc(c);
+        u8 *nb = dl_alloc(c);
         if (!nb) return 0;
         if (D.len) memcpy(nb, D.buf, D.len);
-        if (D.buf) { wipe(D.buf, D.cap); free(D.buf); }
+        dl_release(D.buf, D.cap);
         D.buf = nb;
         D.cap = c;
     }
@@ -892,7 +896,7 @@ static size_t dl_write(char *p, size_t sz, size_t n, void *ud) {
 }
 
 static void dl_drop_buf(void) {
-    if (D.buf) { wipe(D.buf, D.cap); free(D.buf); }
+    dl_release(D.buf, D.cap);
     D.buf = NULL;
     D.len = D.cap = 0;
     D.over = false;
@@ -1044,6 +1048,11 @@ static void fi_reset(void) {
     memset(&FI, 0, sizeof FI);
 }
 static bool fi_busy(void) { return FI.e != NULL; }
+/* Выгрузка памяти (смена сервера, неактивность): аватары вне экрана — сразу, не ждать вытеснения по AV_KEEP_BYTES.
+ * Видимое в этом кадре не трогаем: вернутся на экран — скачаются заново. */
+void img_drop_cache(void) {
+    for (Ent *k; (k = kept_lru()) != NULL;) ent_free(k);
+}
 void img_full_drop(void) { if (FI.state != ST_FREE || FI.px || FI.nx) fi_reset(); }   /* просмотр закрыт: сразу (окно забывает указатель первым) */
 static void fi_frame(void) { if ((FI.state != ST_FREE || FI.px || FI.nx) && FI.gen != s_gen) fi_reset(); }
 size_t img_full_bytes(void) { return px_bytes(FI.pw, FI.ph) + px_bytes(FI.nw, FI.nh) + FI.cap; }

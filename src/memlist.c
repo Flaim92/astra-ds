@@ -422,3 +422,4 @@ u32 ml_test_murmur(const char *s) { return ml_murmur3((const unsigned char *)s, 
 const char *ml_test_list_id(void) { return ML.want; }
 size_t ml_test_bytes(void);
 size_t ml_test_bytes(void) { return (size_t)ML.cap * sizeof(MLRow) + sizeof ML; }
+size_t ml_mem_bytes(void) { return ml_test_bytes(); }   /* «Производительность»: разбор данных */

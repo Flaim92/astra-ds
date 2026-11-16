@@ -2631,6 +2631,61 @@ static void t_memlist(void) {
     bool rel = !role_name(2000, 2001);           /* карточку закрыли — роли сервера отпущены */
     check(card, "список участников (демо): щелчок по участнику открывает карточку");
     check(tabs && rolep && mut && fr && rel, "карточка профиля: вкладки, роли с названиями, общие серверы (ник) и друзья, роли освобождаются при закрытии");
+    {   /* выгрузка памяти: смена сервера (уровни), неактивность (сообщения и звонок продлевают), возврат */
+        ui_test_mem_unload(2, 5);
+        ui_open_channel(3001);
+        bool mu0 = S.open_ch == 3001 && S.nmsgs > 0;
+        ui_test_select_guild(0);
+        bool mu1 = S.open_ch == 0 && S.nmsgs == 0 && ml_total(3001) == -1;
+        ui_test_mem_unload(0, 5);
+        ui_open_channel(3001);
+        ui_test_select_guild(0);
+        bool mu2 = S.open_ch == 3001 && S.nmsgs > 0;   /* выкл: канал остаётся */
+        ui_test_mem_unload(2, 5);
+        ui_open_channel(3001);
+        S.typing_until = 0;
+        g_test_inactive = true;
+        ui_tick();
+        g_clock_skew += 4 * 60000; S.typing_until = 0; ui_tick();
+        bool i1 = S.open_ch == 3001;                  /* 4 мин — ещё рано */
+        ui_on_message(3001, false);                    /* вам пишут — таймер сначала */
+        g_clock_skew += 2 * 60000; S.typing_until = 0; ui_tick();
+        bool i2 = S.open_ch == 3001;
+        g_clock_skew += 4 * 60000; S.typing_until = 0; ui_tick();
+        bool i3 = S.open_ch == 0 && S.nmsgs == 0;     /* 6 мин тишины — выгружено */
+        g_test_inactive = false;
+        ui_tick();
+        bool i4 = S.open_ch == 3001 && S.nmsgs > 0;   /* окно снова активно — канал открыт */
+        g_test_inactive = true;
+        g_audio_busy = true;                           /* звонок: никогда */
+        ui_tick();
+        g_clock_skew += 20 * 60000; S.typing_until = 0; ui_tick();
+        bool i5 = S.open_ch == 3001;
+        g_audio_busy = false;
+        ui_test_mem_unload(2, 0);                      /* «выкл» по неактивности */
+        ui_tick();
+        g_clock_skew += 60 * 60000; S.typing_until = 0; ui_tick();
+        bool i6 = S.open_ch == 3001;
+        g_test_inactive = false;
+        ui_test_mem_unload(0, 0);                      /* дальше — как в остальных сценариях */
+        ui_tick();
+        check(mu0 && mu1 && mu2, "выгрузка памяти: смена сервера закрывает канал прежнего сервера и список участников; «выкл» - не трогает");
+        check(i1 && i2 && i3 && i4 && i5 && i6, "выгрузка памяти: через 5 мин неактивности, новое сообщение продлевает, возврат открывает канал, в звонке и при «выкл» - нет");
+    }
+    {   /* большие ответы мимо кучи: Buf с pg_ok от 32 КБ — страницы, содержимое цело; без pg_ok — как раньше */
+        Buf pb = { .pg_ok = true }, hb = {0};
+        char chunk[1000];
+        for (int k = 0; k < (int)sizeof chunk; k++) chunk[k] = (char)('a' + k % 26);
+        for (int k = 0; k < 100; k++) { buf_put(&pb, chunk, sizeof chunk); buf_put(&hb, chunk, sizeof chunk); }
+        bool p1 = pb.pg && pb.len == 100000 && pb.cap >= 100001 && pb.cap % 4096 == 0 && pb.p[99999] == chunk[999] && pb.p[100000] == 0 && !memcmp(pb.p + 5000, chunk, sizeof chunk);
+        bool p2 = !hb.pg && hb.len == 100000 && !memcmp(hb.p, pb.p, 100000);
+        buf_free(&pb); buf_free(&hb);
+        bool p3 = !pb.p && !pb.pg && pb.pg_ok && !pb.cap;
+        buf_put(&pb, "x", 1);
+        bool p4 = !pb.pg && pb.len == 1;              /* маленький — снова из кучи */
+        buf_free(&pb);
+        check(p1 && p2 && p3 && p4, "большие ответы мимо кучи: от 32 КБ страницами (содержимое цело), освобождение, малые — из кучи");
+    }
     ml_close();
     g_clock_skew = skew0;
     O.demo = demo;
@@ -4989,6 +5044,7 @@ int selftest(void) {
     size_t m0 = plat_private_bytes();
     O.demo = true;
     ui_init();
+    ui_test_mem_unload(0, 0);                    /* выгрузка памяти — только в своей проверке: сценарии ниже ходят по серверам */
     demo_load();
     ui_on_ready();
     {   /* №2: демо-READY — папки из user_settings_proto (с именем и цветом; без имени; из 1, 3 и 4 серверов) */
@@ -6162,6 +6218,45 @@ static int live_golive(void) {
 }
 #endif
 
+/* MC_LIVE=mem: замер памяти на живом аккаунте — только чтение (g_readonly: ничего, кроме GET), невидимо, без отметок
+ * о прочтении; на диск ничего, итог — в консоль. Вход, 20 с покоя; 4 текстовых канала разных серверов с паузами
+ * как у человека; возврат на главную с выгрузкой памяти. */
+static void lv_mem_line(const char *what) {
+    plat_trim();                                 /* как в приложении после смены канала (trim_step) */
+    size_t hu = 0, hf = 0;
+    plat_heap_stats(&hu, &hf);
+    MemBreak mb;
+    store_mem_breakdown(&mb);
+    say("  [%s] частная %.2f МБ; куча: занято %u КБ, не отдано системе %u КБ\n", what, plat_private_bytes() / 1048576.0, (unsigned)(hu / 1024), (unsigned)(hf / 1024));
+    say("      каналы %u + названия %u КБ (%d шт., %d Б каждый), права %u КБ (%d), роли %u КБ (%d), серверы %u КБ,\n"
+        "      пользователи %u + имена %u КБ (%d шт., %d Б каждый), сообщения %u КБ, участники %u КБ, друзья %u КБ; выделений %d\n",
+        (unsigned)(mb.chans / 1024), (unsigned)(mb.chan_str / 1024), mb.nchans, (int)sizeof(Channel), (unsigned)(mb.ow / 1024), mb.now_, (unsigned)(mb.roles / 1024), mb.nroles, (unsigned)(mb.guilds / 1024),
+        (unsigned)(mb.users / 1024), (unsigned)(mb.user_str / 1024), mb.nusers, (int)sizeof(User), (unsigned)(mb.msgs / 1024), (unsigned)(ml_mem_bytes() / 1024), (unsigned)(mb.rels / 1024), mb.nalloc);
+}
+static int live_mem(void) {
+    lv_pump(20000);
+    plat_trim();
+    lv_pump(500);
+    lv_mem_line("после входа, 20 с покоя");
+    ui_test_mem_unload(2, 0);
+    u64 seen[4] = { 0 };
+    int opened = 0;
+    for (int i = 0; i < S.nchans && opened < 4; i++) {
+        const Channel *c = &S.chans[i];
+        if (!c->guild_id || c->type != CH_TEXT || !c->visible || !c->can_history) continue;
+        bool dup = false;
+        for (int k = 0; k < opened; k++) if (seen[k] == c->guild_id) dup = true;
+        if (dup) continue;
+        seen[opened++] = c->guild_id;
+        ui_open_channel(c->id);
+        lv_pump(5000 + (int)(now_ms() % 2000));
+    }
+    lv_mem_line("после 4 каналов на разных серверах");
+    ui_test_select_guild(0);
+    lv_pump(3000);
+    lv_mem_line("главная, после выгрузки прежнего сервера");
+    return 0;
+}
 int selftest_live(void) {
     term_puts("Astra DS --livetest: записи на живом аккаунте (свой тестовый сервер; MC_LIVE=dm — ЛС с MC_LIVE_FRIEND)\n");
     g_headless = true;
@@ -6176,6 +6271,12 @@ int selftest_live(void) {
     ui_init();
     g_http_guard = lv_guard;
     g_http_trace = lv_trace;
+    {   /* MC_LIVE=mem: только чтение, невидимо, без отметок о прочтении — с самого входа */
+        const char *m0 = getenv("MC_LIVE");
+        if (m0 && !strcmp(m0, "mem")) { g_readonly = true; O.invisible = true; O.no_ack = true; }
+        const char *np = getenv("MC_NOPG");
+        if (np && !strcmp(np, "1")) g_pg_off = true;   /* сравнение: крупные блоки из кучи, как до правки */
+    }
     gw_start();
     LV_WAIT(S.ready && !strcmp(gw_status_text(), "в сети"), 60000);
     check(S.ready, "READY (по одному серверу) и gateway «в сети»");
@@ -6194,6 +6295,7 @@ int selftest_live(void) {
     if (mode && !strcmp(mode, "golive")) rc |= live_golive();
 #endif
     if (mode && !strcmp(mode, "friends")) { g_readonly = true; rc |= live_friends(); }   /* только чтение */
+    if (mode && !strcmp(mode, "mem")) rc |= live_mem();   /* только чтение (g_readonly выставлен до входа) */
     say("\n  записей: %d, ошибок ответа: %d, остановлено сторожем: %d\n", lv_writes, lv_errors, lv_blocked);
     say("Итог: %d ok, %d FAIL\n", passes, fails);
     g_http_guard = NULL;

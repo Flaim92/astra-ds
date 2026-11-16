@@ -23,7 +23,12 @@ typedef uint8_t u8;
 #define DISCORD_EPOCH_MS 1420070400000LL
 
 /* ======================= util.c ======================= */
-typedef struct { char *p; size_t len, cap; } Buf;
+/* pg_ok — владелец разрешил крупный блок (от BUF_PG_MIN) брать страницами прямо у системы, мимо кучи (ответы REST,
+ * пакеты шлюза): освобождённое сразу уходит системе, в куче не остаётся «дыр». pg — блок сейчас страничный.
+ * Такой буфер освобождается только buf_free/buf_wipe (не free(b.p)). */
+typedef struct { char *p; size_t len, cap; bool pg_ok, pg; } Buf;
+#define BUF_PG_MIN (32u << 10)
+extern bool g_pg_off;                           /* замеры (--livetest MC_NOPG=1): крупные блоки — из кучи, как раньше */
 void buf_put(Buf *b, const void *s, size_t n);
 void buf_puts(Buf *b, const char *s);
 void buf_printf(Buf *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
@@ -95,6 +100,13 @@ void acct_wipe_all(void);                        /* --logout, паника: вс
 /* main.c: переключить на сохранённый аккаунт / начать вход ещё одного (прежний остаётся сохранённым).
  * Выполняется в главном цикле (не из обработчика ввода). */
 void app_trim_soon(void);                        /* main.c: сжать кучу через несколько секунд покоя */
+void app_trim_in(int ms, bool ram);             /* main.c: сжать кучу через ms (выгрузка памяти), ram — и рабочий набор */
+bool http_release_idle(void);                   /* net.c: закрыть простаивающие соединения REST (false — что-то идёт) */
+bool http_active(void);                         /* net.c: идёт запрос, отправка файла или капча */
+extern bool g_test_inactive;                    /* selftest: окно «не активно» (выгрузка памяти) */
+void ui_test_mem_unload(int lvl, int idle_min);  /* selftest: уровень при смене сервера (0..2) и минуты неактивности */
+void ui_shot_perf(void);                        /* --shot-keys perf: «Настройки -> Производительность» */
+void ui_test_select_guild(int idx);             /* selftest: выбрать сервер (0 — главная, i+1 — S.guilds[i]) */
 void app_trim_after_call(void);                  /* то же после звонка + убрать из оперативной памяти страницы звука Windows */
 void app_account_switch(u64 uid);
 void app_account_add(void);
@@ -213,6 +225,10 @@ typedef struct {
     bool detached;                              /* загружено не до самых новых: плашка «Вернуться к настоящему» */
 } Store;
 extern Store S;
+/* «Производительность»: сколько байт занимает модель по видам (оценка: размеры структур и строк + 16 Б на выделение). */
+typedef struct { size_t guilds, roles, chans, chan_str, ow, users, user_str, msgs, rels; int nchans, now_, nusers, nroles, nalloc; } MemBreak;
+void store_mem_breakdown(MemBreak *m);
+size_t ml_mem_bytes(void);                      /* memlist.c: строки списка участников */
 
 void store_reset(void);
 void store_ready(const cJSON *d);
@@ -330,6 +346,7 @@ void ack_all(void);
 void mark_unread(u64 channel_id, u64 msg_id);   /* непрочитанным начиная с msg_id */
 void store_tick(void);                          /* main.c: отложенные отметки и смена статуса */
 i64 store_next_wake(void);
+bool win_active(void);                          /* окно в фокусе, не свёрнуто и не в трее (выгрузка памяти; без окна — true) */
 bool win_focused(void);                         /* окно активно (gui_win.c; без окна — true) */
 /* Карточка профиля: только по щелчку, без кэша; строки живут до profile_close. */
 typedef struct {

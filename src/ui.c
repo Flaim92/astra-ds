@@ -144,7 +144,7 @@ enum {
     B_PINS_MORE, B_INBOX_T0, B_INBOX_T1, B_ACK_ALL, B_EP_X, B_EMOJI, B_CAP_GO, B_CAP_NO,
     B_ADDSRV, B_GMENU, B_GINVITE, B_ADDFRIEND, B_TXT_EXP, B_TXT_DL, B_STARTASK, B_RV_X, B_EPH_HIDE, B_EMBEDS, B_MRETRY, B_MDISCARD,
     B_MICTEST, B_ZOOM_DN, B_ZOOM_0, B_ZOOM_UP, B_IV_X, B_IV_PREV, B_IV_NEXT, B_FSORT, B_FPREV, B_FNEXT, B_CSEL_X, B_CSEL_OK, B_ALERTS, B_REQS, B_RQTAB, B_RQ_OK, B_RQ_NO, B_CARD_KICK, B_CARD_FULL, B_RING_AGAIN, B_RING_STOP, B_RING_ALL_STOP, B_FULL, B_FILTER, B_STREAMER, B_NOTIFY, B_AVBIG, B_ARCH_X, B_FNEW, B_MEPROF, B_TM_X, B_RAMBAR, B_IMGCLICK, B_FSPOIL, B_FALT, B_MOD, B_FSEND, B_CARD_IGN, B_CARD_NOTE, B_NOTE_EDIT, B_RULES, B_RULES_OK, B_RULES_X, B_SOUNDS, B_HPF, B_LANG, B_UP_APPLY, B_UP_LATER, B_UP_RESTART, B_UP_AUTO, B_UP_CHECK, B_DUCK, B_SHARE, B_UP_ANYWAY, B_UP_CANCEL, B_PTT_SET, B_PTT_CLR, B_VADAUTO, B_VSTATUS, B_NS_OFF, B_NS_SPX, B_NS_RNN, B_WATCH, B_WATCH_STOP, B_WATCH_PICK, B_WATCH_FULL, B_WATCH_CHAT, B_WATCH_SHOW, B_CAM, B_CAM_PV, B_CAM_VIEW, B_CAM_TILE, B_ANON, B_MICG_DN, B_MICG_UP, B_MICG_0, B_HIDECAP, B_WSV_DN, B_WSV_UP, B_WSV_0, B_WSV_MUTE, B_GAME, B_ACT, B_ACT_X, B_ACT_CARD,
-    B_SP_PREV, B_SP_NEXT, B_CARD_TAB, B_CARD_GUILD, B_CARD_FRIEND
+    B_SP_PREV, B_SP_NEXT, B_CARD_TAB, B_CARD_GUILD, B_CARD_FRIEND, B_UNL_SRV, B_UNL_IDLE, B_UNL_NOW
 };
 enum { MI_REPLY = 1, MI_EDIT, MI_DELETE, MI_REACT, MI_COPY,
        MI_FX, MI_VADDN, MI_VADUP, MI_HELP, MI_QUIT,             /* меню сообщения и меню настроек */
@@ -3628,6 +3628,8 @@ static void st_hint(int *x, int y, int *left, const char *s) {
     *left -= u;
 }
 /* Строка под полем ввода (клетки x0..x1-1): входящий звонок | «печатает...» | уведомление или подсказка. */
+static int mu_level(void);                       /* выгрузка памяти (ниже, у select_guild) */
+static int mu_idle_min(void);
 static bool show_ram = true;                     /* №13: память в строке состояния (настройка «Производительность») */
 #ifdef ASTRA_VIDEO
 /* кодер: имя автора трансляции — как в списке голосового канала (ник на сервере из VoiceState), иначе глобальное */
@@ -4509,6 +4511,13 @@ static void draw_settings(int W, int H) {
             snprintf(t, sizeof t, TR("серверов %d, каналов %d, пользователей %d, друзей и заявок %d, сообщений в открытом канале %d"),
                      S.nguilds, S.nchans, S.nusers, S.nrels, S.nmsgs);
             y += set_row(x, y, w, TR("ДАННЫЕ"), t, C_TEXT);
+            MemBreak mb;
+            store_mem_breakdown(&mb);
+            char tb[640];
+            snprintf(tb, sizeof tb, TR("каналы %zu КБ (+ названия %zu КБ), права каналов %zu КБ (%d), роли %zu КБ (%d), серверы %zu КБ, пользователи %zu КБ (+ имена %zu КБ), сообщения %zu КБ, участники %zu КБ, друзья %zu КБ; канал %d Б, польз. %d Б"),
+                     mb.chans / 1024, mb.chan_str / 1024, mb.ow / 1024, mb.now_, mb.roles / 1024, mb.nroles, mb.guilds / 1024, mb.users / 1024, mb.user_str / 1024,
+                     mb.msgs / 1024, ml_mem_bytes() / 1024, mb.rels / 1024, (int)sizeof(Channel), (int)sizeof(User));
+            y += set_row(x, y, w, TR("РАЗБОР ДАННЫХ"), tb, C_TEXT);
         }
         snprintf(t, sizeof t, TR("картинки на экране %zu КБ; сетка %dx%d клеток %zu КБ; строк ленты %d"),
                  img_cache_bytes() / 1024, U.gw, U.gh, (size_t)U.gw * (size_t)U.gh * sizeof(Cell) / 1024, U.mlcap);
@@ -4537,6 +4546,28 @@ static void draw_settings(int W, int H) {
             if (t[0]) y += set_row(x, y, w, TR("ШУМОПОДАВЛЕНИЕ"), t, C_MUTED);
         }
         g_button(x, y, show_ram ? TR("[x] Память в строке состояния") : TR("[ ] Память в строке состояния"), w, show_ram ? 1 : 0, B_RAMBAR);
+        y += 2;
+        {   /* выгрузка памяти: при смене сервера и при неактивности */
+            static const char *const lv[3] = { "выкл", "обычная", "полная" };
+            g_text(x, y++, TR("ВЫГРУЗКА ПАМЯТИ"), w, C_MUTED, AT_B);
+            int l = mu_level(), m = mu_idle_min();
+            snprintf(t, sizeof t, TR("При смене сервера: %s"), tr(lv[l < 0 || l > 2 ? 2 : l]));
+            int bx = x + g_button(x, y, t, w, l ? 1 : 0, B_UNL_SRV) + 1;
+            if (m) snprintf(t, sizeof t, TR("При неактивности: %d мин"), m); else snprintf(t, sizeof t, "%s", TR("При неактивности: выкл"));
+            g_button(bx, y, t, x + w - bx, m ? 1 : 0, B_UNL_IDLE);
+            y += 2;
+            g_button(x, y, TR("Освободить сейчас"), w, 0, B_UNL_NOW);
+            y++;
+            const char *hint[2] = { l == 2 ? TR("полная: ещё аватарки и соединения прежнего сервера - при возврате догрузятся") : l == 1 ? TR("обычная: сообщения, участники и эмодзи прежнего сервера") : TR("при смене сервера ничего не выгружается"),
+                                    TR("пока вы в окне, пишете или вам пишут - ничего не выгружается; в звонке - никогда") };
+            for (int hi = 0; hi < 2; hi++) {     /* подсказки — с переносом по ширине */
+                char **hl = NULL, *hc = xstrdup(hint[hi]);
+                int nh = help_wrap(hc, w, &hl);
+                free(hc);
+                for (int k = 0; k < nh; k++) { g_text(x, y++, hl[k], w, C_MUTED, 0); free(hl[k]); }
+                free(hl);
+            }
+        }
         break;
     }
     case SS_NOTIF: {
@@ -9588,7 +9619,7 @@ enum { B_LG_VCHECK = 200, B_LG_VSKIP, B_LG_LOGIN, B_LG_FORGOT, B_LG_REGISTER, B_
        B_LG_CODE, B_LG_SMS, B_LG_BACKUP, B_LG_TOTP, B_LG_RETRY, B_LG_RESTART, B_LG_QRDEMO, B_LG_QRNEW, B_LG_UNDEL,
        B_LG_SMSAGAIN, B_LG_CAPOPEN, B_LG_CAPCANCEL, B_LG_NOASK, B_LG_VRETRY, B_LG_VQUIT, B_LG_ACCBACK };
 /* кнопки входа и общие B_* — одна таблица щелчков (Hit.sub — u8): номера не должны пересекаться */
-_Static_assert((int)B_CARD_FRIEND < (int)B_LG_VCHECK, "B_* дошли до B_LG_*: поднимите B_LG_VCHECK");
+_Static_assert((int)B_UNL_NOW < (int)B_LG_VCHECK, "B_* дошли до B_LG_*: поднимите B_LG_VCHECK");
 _Static_assert(B_LG_ACCBACK < 256, "B_LG_* не влезают в Hit.sub (u8)");
 #define C_LINK 0x4ea8deu
 static struct {
@@ -10691,10 +10722,144 @@ static Message *last_own(void) {
 #endif
     return NULL;
 }
+/* ======================= выгрузка памяти (Настройки -> Производительность) =======================
+ * При смене сервера: 0 выкл, 1 обычная (канал прежнего сервера, участники, эмодзи, пользователи, куча),
+ * 2 полная (+ аватары вне экрана, мелкая сетка, простаивающие соединения REST, рабочий набор).
+ * При неактивности (mu_idle минут, 0 — выкл): окно не активно и ничего не происходило — ни ввода, ни сообщений
+ * в открытом канале и ЛС, ни «печатает», ни звонка — полная выгрузка с закрытием канала; возврат (ввод или
+ * окно снова активно) — канал открывается заново. Никогда: в звонке/голосе, при просмотре трансляции,
+ * во время отправки и капчи, в окне формы или входа. Шлюз не трогается — сообщения приходят как обычно.
+ * Настройка — запись хранилища "mem-unload" = "уровень,минуты" (по умолчанию записи нет; на диск ничего). */
+bool g_test_inactive;                            /* selftest: окно «не активно» */
+static int mu_lvl = -1, mu_idle = 5;
+static i64 mu_last;                              /* последняя активность (0 — ещё не было: считать от запуска) */
+static bool mu_done;                             /* выгружено по неактивности: ждём возврата */
+static u64 mu_ch;                                /* канал, закрытый выгрузкой: открыть при возврате */
+static void mu_load(void) {
+    if (mu_lvl >= 0) return;
+    mu_lvl = 2;
+    mu_idle = 5;
+    char b[16];
+    int n = O.demo || O.no_save ? -1 : keyring_load("mem-unload", b, sizeof b - 1);
+    if (n > 0 && n < (int)sizeof b) {
+        b[n] = 0;
+        int a = -1, m = -1;
+        if (sscanf(b, "%d,%d", &a, &m) == 2) {
+            if (a >= 0 && a <= 2) mu_lvl = a;
+            if (m == 0 || m == 1 || m == 5 || m == 15) mu_idle = m;
+        }
+    }
+}
+static void mu_save(void) {
+    U.full = U.dirty = true;
+    if (O.demo || O.no_save) return;
+    if (mu_lvl == 2 && mu_idle == 5) { keyring_delete("mem-unload"); return; }   /* по умолчанию — записи нет */
+    char b[16];
+    int n = snprintf(b, sizeof b, "%d,%d", mu_lvl, mu_idle);
+    keyring_save("mem-unload", b, (size_t)n);
+}
+static int mu_level(void) { mu_load(); return mu_lvl; }
+static int mu_idle_min(void) { mu_load(); return mu_idle; }
+static void mu_level_next(void) { mu_load(); mu_lvl = (mu_lvl + 1) % 3; mu_save(); }
+static void mu_idle_next(void) {
+    mu_load();
+    static const int st[] = { 0, 1, 5, 15 };
+    int i = 0;
+    while (i < 4 && st[i] != mu_idle) i++;
+    mu_idle = st[(i + 1) % 4];
+    mu_save();
+}
+/* Окно активно: в фокусе, не свёрнуто и не в трее (без окна — по вводу). */
+static bool mu_window_active(void) { return !g_test_inactive && win_active(); }
+static void ui_activity(void) { mu_last = now_ms(); }
+static bool mu_busy(void) {
+    VoiceStatus vs;
+    voice_status(&vs);
+    if (vs.phase != VS_IDLE || g_audio_busy || S.call.ringing) return true;
+#ifdef ASTRA_VIDEO
+    if (wv_on()) return true;
+#endif
+    return FM.id || LG.on || http_active();
+}
+/* Закрыть открытый канал (как «Друзья»): черновик — в память черновиков, лента и участники — освободить. */
+static void close_open_channel(void) {
+    if (!S.open_ch) return;
+    draft_swap(S.open_ch, 0);
+    S.open_ch = 0;
+    msgs_clear();
+    forum_close();
+    ml_close();
+    S.typing_until = 0;
+    U.sel_msg = -1;
+    U.msg_scroll = 0;
+    U.mode = M_NORMAL;
+    U.menu = false;
+    U.dirty = true;
+}
+/* Освободить кэши; lvl 1 — данные, lvl 2 — ещё картинки и соединения. */
+static void mu_free(int lvl) {
+    emoji_close();
+    if (!FM.id) forms_closed();
+    users_gc(true);
+    if (lvl >= 2) {
+        img_drop_cache();
+        fine_cache_drop();
+        free(AVB.buf); AVB.buf = NULL; AVB.cap = 0;
+        if (!S.open_ch) { free(U.ml); U.ml = NULL; U.mlcap = 0; }   /* строки ленты — только когда ленты нет */
+        http_release_idle();
+    }
+}
+/* selftest: уровни без хранилища и выбор сервера напрямую */
+void ui_test_mem_unload(int lvl, int idle_min) { mu_load(); mu_lvl = lvl; mu_idle = idle_min; mu_done = false; mu_ch = 0; mu_last = 0; }
+void ui_test_select_guild(int idx);
+/* Смена сервера: прежний — выгрузить (канал прежнего сервера закрыть). */
+static void mu_on_guild_switch(u64 new_gid) {
+    if (mu_level() == 0) return;
+    const Channel *oc = chan_find(S.open_ch);
+    if (oc && oc->guild_id && oc->guild_id != new_gid) close_open_channel();
+    else if (!S.open_ch) ml_close();
+    mu_free(mu_lvl);
+    app_trim_in(500, mu_lvl >= 2);               /* быстрые щелчки по серверам — одно сжатие в конце */
+}
+/* «Освободить сейчас» (кнопка) и неактивность (close_ch). */
+static void mu_unload_now(bool close_ch) {
+    if (close_ch && S.open_ch) { mu_ch = S.open_ch; close_open_channel(); }
+    mu_free(2);
+    app_trim_in(0, true);
+}
+/* Вернулись (ввод или окно снова активно): открыть закрытый выгрузкой канал. */
+static void mu_return(void) {
+    if (!mu_done) return;
+    mu_done = false;
+    u64 ch = mu_ch;
+    mu_ch = 0;
+    if (ch && !S.open_ch && chan_find(ch)) open_channel(ch);
+    U.full = U.dirty = true;
+}
+/* ui_tick: пора ли выгружать по неактивности. */
+static void mu_tick(i64 now) {
+    if (O.cli) return;
+    if (mu_window_active() || mu_busy() || S.typing_until > now) { ui_activity(); if (mu_done && mu_window_active()) mu_return(); return; }
+    if (!mu_last) mu_last = now;
+    int m = mu_idle_min();
+    if (!m || mu_done || now - mu_last < (i64)m * 60000) return;
+    mu_done = true;
+    mu_unload_now(true);
+}
+/* ui_next_wake: когда проверить неактивность (окно активно — смена фокуса и так разбудит цикл). */
+static i64 mu_next_wake(void) {
+    int m = mu_idle_min();
+    if (O.cli || !m || mu_done || mu_window_active() || !mu_last) return INT64_MAX;
+    return mu_last + (i64)m * 60000;
+}
+
 static void select_guild(int idx) {
     if (idx < 0) idx = 0;
     if (idx > S.nguilds) idx = S.nguilds;
-    if (idx != U.sel_guild) { search_off(); U.pick = false; }   /* результаты поиска — по прошлому серверу */
+    if (idx != U.sel_guild) {
+        search_off(); U.pick = false;            /* результаты поиска — по прошлому серверу */
+        mu_on_guild_switch(idx > 0 && idx <= S.nguilds ? S.guilds[idx - 1].id : 0);   /* выгрузка памяти прежнего сервера */
+    }
     U.sel_guild = idx;
     rail_fcur = 0;                               /* курсор клавиатуры — на выбранном сервере */
     U.sel_row = -1;
@@ -10702,6 +10867,9 @@ static void select_guild(int idx) {
     U.row_free = U.guild_free = false;
     rebuild_rows();
 }
+void ui_test_select_guild(int idx) { select_guild(idx); }
+/* --shot-keys perf: открыть «Настройки -> Производительность» (только просмотр, для замеров памяти) */
+void ui_shot_perf(void) { U.settings = true; U.set_sec = SS_PERF; U.full = U.dirty = true; }
 static void move_row(int d) {
     if (!U.nrows) return;
     int i = U.sel_row;
@@ -11776,6 +11944,16 @@ static void button(int id, int x, int y) {
     case B_MEPROF: U.settings = false; U.full = true; fm_open(FM_MEPROF, 0, 0); break;
     case B_TM_X: tm_on = false; thread_members_close(); break;
     case B_RAMBAR: show_ram = !show_ram; break;
+    case B_UNL_SRV: mu_level_next(); break;
+    case B_UNL_IDLE: mu_idle_next(); break;
+    case B_UNL_NOW: {                            /* освободить сейчас: открытый канал остаётся */
+        size_t before = plat_private_bytes();
+        mu_unload_now(false);
+        plat_trim();
+        size_t after = plat_private_bytes();
+        ui_notice(TR("память: %.1f -> %.1f МБ"), before / 1048576.0, after / 1048576.0);
+        break;
+    }
     case B_FSPOIL: file_spoil = !file_spoil; break;
     case B_CARD_IGN: if (U.card_uid) { bool on = !ignored(U.card_uid); ignore_set(U.card_uid, on); ui_notice(on ? TR("сообщения скрыты (только у вас)") : TR("больше не игнорируется")); } break;
     case B_CARD_NOTE: if (U.card_uid) note_open(U.card_uid); break;
@@ -12681,6 +12859,7 @@ void ui_handle_input(void) {
     Key k[64];
     int n;
     while ((n = term_read(k, 64)) > 0) for (int i = 0; i < n && !g_quit; i++) {
+        if (k[i].code != K_RESIZE) { ui_activity(); mu_return(); }   /* выгрузка памяти: вы здесь */
         if (k[i].code == K_MOUSE && k[i].button == 0) { handle_key(&k[i]); continue; }
         bool is_panic = panic_key(&k[i]);
         if (is_panic && k[i].code != K_RESIZE) {
@@ -12695,6 +12874,7 @@ void ui_handle_input(void) {
 }
 
 void ui_tick(void) {
+    mu_tick(now_ms());                           /* выгрузка памяти при неактивности */
     {   /* вступили по приглашению и сервер пришёл: открыть его и закрыть карточку */
         u64 g = invite_take_goto();
         if (g) { if (FM.id == FM_JOINCARD) fm_close(); goto_guild(g); }
@@ -12892,6 +13072,8 @@ i64 ui_next_wake(void) {
     if (U.notice_until > now && U.notice_until < t) t = U.notice_until;
     if (U.npk && U.pk_until < t) t = U.pk_until;
     if (act_wake) { if (act_wake <= now) { act_wake = 0; U.dirty = true; } else if (act_wake < t) t = act_wake; }   /* «Активно сейчас»: время */
+    i64 mw = mu_next_wake();                     /* выгрузка памяти при неактивности */
+    if (mw < t) t = mw;
     return t;
 }
 
@@ -12912,6 +13094,7 @@ void ui_on_ready(void) {
 
 void ui_on_message(u64 channel_id, bool mention) {
     if (O.cli) { cli_on_message(channel_id, mention); return; }
+    { const Channel *mc = chan_find(channel_id); if (channel_id == S.open_ch || (mc && !mc->guild_id)) ui_activity(); }   /* переписка идёт — не выгружать */
     if (channel_id == S.open_ch) {
         U.ack_at = now_ms() + 1500;
         if (U.msg_scroll == 0) U.sel_msg = U.focus == F_MESSAGES ? U.sel_msg : -1;
