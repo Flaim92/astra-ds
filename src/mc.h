@@ -82,6 +82,26 @@ bool cred_load(void);                            /* из системного х
 bool cred_save(void);
 void cred_delete(void);
 bool read_hidden(const char *prompt);            /* скрытый ввод токена в консоли */
+/* Несколько аккаунтов (secret.c). Токен каждого — отдельная запись хранилища "acct:<id>", список (id и имя) —
+ * запись "accounts"; "token" — как раньше, активный аккаунт. Токены неактивных в памяти не держатся: читаются
+ * только при переключении, сразу в защищённую область. --no-save и --demo хранилище не трогают. */
+#define ACC_MAX 5
+typedef struct { u64 id; char name[64]; } AcctInfo;
+int acct_list(AcctInfo *out, int max);           /* сохранённые аккаунты, по порядку добавления */
+bool acct_save_current(u64 uid, const char *name);   /* текущий токен -> "acct:<uid>" и в список (имя обновляется) */
+bool acct_load(u64 uid);                         /* токен аккаунта -> защищённая область; false — нет / битый (текущий не тронут) */
+void acct_delete(u64 uid);                       /* убрать из хранилища и списка */
+void acct_wipe_all(void);                        /* --logout, паника: все аккаунты и список */
+/* main.c: переключить на сохранённый аккаунт / начать вход ещё одного (прежний остаётся сохранённым).
+ * Выполняется в главном цикле (не из обработчика ввода). */
+void app_trim_soon(void);                        /* main.c: сжать кучу через несколько секунд покоя */
+void app_trim_after_call(void);                  /* то же после звонка + убрать из оперативной памяти страницы звука Windows */
+void app_account_switch(u64 uid);
+void app_account_add(void);
+bool app_account_adding(void);                   /* идёт вход дополнительного аккаунта: на экране входа есть «Назад» */
+void app_account_add_cancel(void);               /* «Назад»: вернуться к прежнему аккаунту */
+void ui_login_cancel(void);                      /* ui.c: закрыть окно входа без входа */
+void ui_account_switched(void);                  /* ui.c: аккаунт сменился — сбросить выбор сервера, канала, окна */
 
 /* ======================= store.c ======================= */
 enum { CH_TEXT = 0, CH_DM = 1, CH_VOICE = 2, CH_GROUP = 3, CH_CATEGORY = 4, CH_NEWS = 5, CH_STAGE = 13,
@@ -160,7 +180,7 @@ typedef struct {
 /* Друзья: хранится только id + тип + статус (16 байт на запись), имя и аватар — user_name()/user_avatar(). */
 enum { REL_FRIEND = 1, REL_BLOCKED = 2, REL_IN = 3, REL_OUT = 4 };   /* друг, заблокирован, входящая, исходящая заявка */
 enum { PS_OFFLINE, PS_ONLINE, PS_IDLE, PS_DND };                     /* статус — только у друзей (REL_FRIEND) */
-typedef struct { u64 id; u8 type, status; } Relation;
+typedef struct { u64 id; u8 type, status; u8 act_type; char *act; i64 act_start; } Relation;   /* act — игра/музыка друга (NULL — нет), act_start — unix-мс начала (0 — неизвестно) */
 
 /* Поиск сообщений: одна страница (<= 25), живёт до search_close(). */
 #define SEARCH_PAGE 25
@@ -333,6 +353,9 @@ void profile_close(void);
 /* Свой статус: op 3 не чаще 5 раз за 20 с (лишнее откладывается, побеждает последнее). */
 enum { PS_INVISIBLE = 4 };
 void presence_set(u8 st);
+bool game_activity_on(void);                     /* «Показывать, во что я играю» (Конфиденциальность) */
+void game_activity_set(bool on);
+const char *game_activity_name(void);            /* игра сейчас или NULL */
 u8 presence_me(void);
 /* Меню человека */
 void rel_block(u64 uid);                        /* PUT relationships {"type":2} */
@@ -695,7 +718,8 @@ typedef struct {
 } InviteState;
 #define INVITE_GAP_MS 30000                     /* пауза между вступлениями */
 const char *invite_risk_text(void);             /* текст разового предупреждения */
-void invite_risk_ack(void);                     /* пользователь согласился (до выхода из программы) */
+void invite_risk_ack(void);                     /* пользователь согласился (запоминается в хранилище) */
+u64 invite_take_goto(void);                     /* вступили и сервер пришёл: его id (один раз), иначе 0 */
 bool invite_open_browser(void);                 /* открыть https://discord.gg/КОД в браузере (только проверенный код) */
 bool open_url_browser(const char *url);         /* gui_win.c / main.c: системный браузер; только https://discord.gg/ и discord.com/invite/ */
 void invite_open(const char *code_or_url);      /* GET /invites/{code}?with_counts=true */

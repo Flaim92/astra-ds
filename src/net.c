@@ -508,12 +508,14 @@ static const char *cap_what(const Req *r) {
     if (!strcmp(r->method, "POST") && !strcmp(r->path, "/users/@me/channels")) return ui_tr("новая беседа");
     if (!strcmp(r->method, "POST") && strstr(r->path, "/messages") && !strstr(r->path, "/ack") && !strstr(r->path, "/messages/")) return ui_tr("отправка сообщения");
     if (!strcmp(r->method, "PUT") && strstr(r->path, "/reactions/")) return ui_tr("реакция");
+    if (!strcmp(r->method, "POST") && !strncmp(r->path, "/invites/", 9)) return ui_tr("вступление на сервер");
     return ui_tr("запрос к Discord");
 }
 /* Ответ — капча? Тогда запрос остаётся у нас (true), иначе — обычный путь (false). */
 static bool cap_take(Req *r) {
     if (r->r.status != 400 || !r->r.body.p || r->fp) return false;
-    if (!strncmp(r->path, "/invites/", 9)) return false;   /* вступление: капча -> «вступите через браузер» (store.c) */
+    /* вступление на сервер — тоже через своё окно проверки (раньше: капча -> браузер, а сайт просит открыть
+     * официальное приложение); не вышло (нет WebView2, трижды не принято) — store.c покажет причину */
     if (!strstr(r->r.body.p, "captcha_key") && !strstr(r->r.body.p, "captcha_sitekey")) return false;
     if (CP.r && CP.r != r) { ui_notice(ui_tr("Discord просит ещё одну проверку - сначала завершите текущую")); return false; }
     if (r->cap_round >= 3) return false;        /* трижды не принято — отдаём ошибку */

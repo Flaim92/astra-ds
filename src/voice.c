@@ -1794,6 +1794,7 @@ static void stop_thread(void) {
     thread_join(V.thr);
     V.thr = NULL;
     plat_trim();                                /* декодеры, буферы и сессия DAVE освобождены: вернуть память системе */
+    app_trim_after_call();                      /* и через несколько секунд — освободить оперативную память после звонка */
     atomic_store(&V.stop, false);
 }
 

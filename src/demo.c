@@ -97,7 +97,7 @@ static const char READY[] =
     "{\"id\":\"1007\",\"type\":3,\"user\":{\"id\":\"1007\",\"username\":\"neznakomec\",\"global_name\":\"Незнакомец\"}},"
     "{\"id\":\"1008\",\"type\":4,\"user_id\":\"1008\"},{\"id\":\"1009\",\"type\":2,\"user_id\":\"1009\"},"
     "{\"id\":\"1003\",\"type\":5,\"user_id\":\"1003\"}],"
-    "\"merged_presences\":{\"friends\":[{\"user_id\":\"1001\",\"status\":\"online\"},{\"user_id\":\"1002\",\"status\":\"idle\"},"
+    "\"merged_presences\":{\"friends\":[{\"user_id\":\"1001\",\"status\":\"online\",\"activities\":[{\"type\":0,\"name\":\"Minecraft\"}]},{\"user_id\":\"1002\",\"status\":\"idle\",\"activities\":[{\"type\":2,\"name\":\"Spotify\"}]},"
     "{\"user_id\":\"1004\",\"status\":\"dnd\"},{\"user_id\":\"1006\",\"status\":\"online\"},{\"user_id\":\"1009\",\"status\":\"online\"}],\"guilds\":[]},"
     "\"guilds\":[{\"id\":\"2000\",\"properties\":{\"name\":\"Уютный уголок\",\"owner_id\":\"1001\",\"icon\":\"0123456789abcdef0123456789abcdef\"},"
     "\"roles\":[{\"id\":\"2000\",\"permissions\":\"274881170497\"},{\"id\":\"2001\",\"name\":\"Админ\",\"hoist\":true,\"permissions\":\"8\",\"color\":15548997,\"position\":3},"

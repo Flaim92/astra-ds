@@ -2683,7 +2683,7 @@ static void t_friends(void) {
     int n = rel_list(&rs);
     bool sorted = true;
     for (int i = 1; i < n; i++) if (rs[i - 1].id >= rs[i].id) sorted = false;
-    check(n == 8 && sorted && sizeof(Relation) == 16, "READY relationships: 8 записей (тип 5 не хранится), по id, 16 байт на запись");
+    check(n == 8 && sorted && sizeof(Relation) <= 32, "READY relationships: 8 записей (тип 5 не хранится), по id, не больше 32 байт на запись (с игрой для «Активно сейчас»)");
     check(rel_type(1001) == REL_FRIEND && rel_type(1007) == REL_IN && rel_type(1008) == REL_OUT && rel_type(1009) == REL_BLOCKED && !rel_find(1003),
           "типы: друг / входящая / исходящая / заблокирован");
     check(!strcmp(user_name(1007), "Незнакомец"), "имя из объекта user в записи отношения");
@@ -5114,6 +5114,30 @@ int selftest_keyring(void) {
         check(keyring_load_raw("vless", false, buf, 64) < 0 && keyring_load_raw("vless", true, buf, 64) < 0,
               "удаление (--logout, паника) стирает запись под обоими именами");
         wipe(buf, sizeof buf);
+    }
+    {   /* несколько аккаунтов: два токена под своими записями, список, переключение, удаление, полная очистка */
+        static const char T1[] = "MTAwMDAwMDAwMDAwMDAwMDAx.AAAAAA.astra-acct-test-token-one-11";
+        static const char T2[] = "MTAwMDAwMDAwMDAwMDAwMDAy.BBBBBB.astra-acct-test-token-two-22";
+        AcctInfo a[ACC_MAX];
+        acct_wipe_all();
+        secret_set(T1, sizeof T1 - 1);
+        bool s1 = acct_save_current(1001, "Первый\tс\nтабом");
+        secret_set(T2, sizeof T2 - 1);
+        bool s2 = acct_save_current(1002, "Второй");
+        int n = acct_list(a, ACC_MAX);
+        check(s1 && s2 && n == 2 && a[0].id == 1001 && a[1].id == 1002 && !strcmp(a[0].name, "Первыйстабом") && !strcmp(a[1].name, "Второй"),
+              "аккаунты: два сохранены, список по порядку, управляющие символы из имени выброшены");
+        check(acct_load(1001) && secret_token() && !strcmp(secret_token(), T1), "аккаунты: переключение читает токен первого");
+        check(!acct_load(4242) && secret_token() && !strcmp(secret_token(), T1), "аккаунты: нет записи — отказ, текущий токен не тронут");
+        acct_delete(1001);
+        n = acct_list(a, ACC_MAX);
+        check(n == 1 && a[0].id == 1002 && !acct_load(1001), "аккаунты: удалённый пропал из списка и хранилища");
+        for (int i = 0; i < ACC_MAX + 1; i++) { secret_set(T1, sizeof T1 - 1); acct_save_current(2000 + (u64)i, "x"); }
+        n = acct_list(a, ACC_MAX);
+        check(n == ACC_MAX, "аккаунты: больше ACC_MAX не добавляется");
+        acct_wipe_all();
+        check(acct_list(a, ACC_MAX) == 0 && !acct_load(1002) && !acct_load(2000), "аккаунты: полная очистка (--logout, паника) — пусто");
+        secret_set("", 0);
     }
     secret_destroy();
     check(secret_token() == NULL, "защищённая память освобождена");

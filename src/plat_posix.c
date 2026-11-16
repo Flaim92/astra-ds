@@ -113,6 +113,9 @@ void plat_trim(void) {}                         /* аллокатор macOS от
 #else
 void plat_lock(void *p, size_t n) { mlock(p, n); madvise(p, n, MADV_DONTDUMP); }
 void plat_trim(void) { malloc_trim(0); }
+void plat_mem_tune(void) {}
+void plat_trim_ram(void) {}
+void plat_heap_stats(size_t *used, size_t *free_commit) { *used = *free_commit = 0; }
 #endif
 void plat_unlock(void *p, size_t n) { munlock(p, n); }
 void plat_wipe(void *p, size_t n) { if (p && n) explicit_bzero(p, n); }
@@ -457,6 +460,7 @@ const char *keyring_name(void) { return "Secret Service (secret-tool)"; }
  * Временный буфер сверки — закреплённые страницы, затираются. Самопроверка — свои записи, без миграции. */
 static bool kr_ro;                              /* --no-save: миграцию не записывать (только читать старое) */
 void keyring_readonly(bool on) { kr_ro = on; }
+int plat_proc_names(void (*cb)(const char *exe, void *ud), void *ud) { (void)cb; (void)ud; return -1; }   /* «Играет в» — пока только Windows */
 int keyring_load(const char *entry, char *out, size_t cap) {
     int n = kr_load_svc(KR_NEW, entry, out, cap);
     if (n >= 0) { if (!kr_ro) kr_delete_svc(KR_OLD, entry); return n; }   /* П1-а: старый след убрать тихо */

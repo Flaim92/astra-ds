@@ -30,8 +30,12 @@
  * если до конца кадра (ESC[?2026l) пришёл такой же слой — снятие отменяется без перерисовки.
  * Новый слой с теми же X, Y, W заменяет старый; пересекающийся — тоже. Слоёв не больше LAYER_MAX,
  * всего не больше LAYER_BYTES (7 байт на мелкую клетку), старые вытесняются. */
-#define LAYER_MAX 6
+#define LAYER_MAX 24                            /* мелких аватаров (списки ЛС, участники) много: место по числу, память — по LAYER_BYTES */
 #define LAYER_BYTES (192u << 10)                 /* 6 превью 32x8 при K=4 = 6 x 28 КБ */
+/* Таблица закраски символов (img.c): доля закраски 2 x 4 частей символа 0x20..0x7E, 0..255. img.c подбирает
+ * символ и цвета так, что bg + cov * (fg - bg) повторяет 2 x 4 пикселя картинки; окно по ней же восстанавливает
+ * пиксели слоя и рисует картинку растром, а не мелким шрифтом. */
+extern const u8 img_glyph_cov[95][8];
 typedef struct {
     int x, y, w, h, k;
     u32 hash;                   /* подпись содержимого: тот же слой повторно — без перерисовки */
@@ -140,6 +144,20 @@ bool gb_video_shown(void);                      /* окно видно (не с�
 void *gb_vbuf_alloc(size_t n);                  /* растр кадра (X11: сегмент MIT-SHM, если можно); из любого потока */
 void gb_vbuf_free(void *p, size_t n);
 #endif
+
+/* ---------- картинка просмотра растром поверх клеток (gui_grid.c; пиксели — img_full в img.c) ---------- */
+typedef struct { int x, y, w, h; const u32 *px; int pw, ph; u32 bg; } GpPic;   /* клетки области, пиксели 0x00RRGGBB */
+bool term_picture_ok(void);                     /* окно рисует растр (Windows); иначе — ASCII */
+void term_cells_px(int w, int h, int *pw, int *ph);   /* клетки -> пиксели окна */
+bool term_picture(int x, int y, int w, int h, const u32 *px, int pw, int ph, u32 bg);   /* заявка на кадр */
+void gpic_frame_begin(void);                    /* gui_size: начало render() */
+void gpic_commit(void);                         /* ESC[?2026l: зафиксировать заявку */
+void gpic_forget(void);                         /* img.c освобождает пиксели — забыть */
+bool gpic_get(GpPic *o);                        /* бэкенд при рисовании */
+bool gb_pic_ok(void);                           /* бэкенд: умеет растр картинки */
+void term_cursor(int kind);                     /* курсор мыши: 0 — стрелка, 1 — «<->» (край колонки) */
+void gb_cursor(int kind);                       /* бэкенд */
+void gb_cell_size(int *cw, int *ch);            /* бэкенд: клетка, пиксели */
 
 /* Для plat.h (координатору): 0 — терминал или окно не умеет; иначе наибольший масштаб K. */
 int term_subcell_scale(void);

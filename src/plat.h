@@ -44,7 +44,13 @@ size_t plat_private_bytes(void);               /* частная память п
 long long plat_thread_cpu_us(void);             /* время процессора текущего потока, мкс (GetThreadTimes / CLOCK_THREAD_CPUTIME_ID) */
 long long plat_now_us(void);                    /* монотонные микросекунды */
 int64_t plat_cpu_ms(void);
-void plat_trim(void);                           /* вернуть системе свободную память кучи */                      /* процессорное время процесса */
+/* Куча: занято (used) и закоммичено, но свободно (free) — для «Производительности»; 0/0 — не умеет. */
+void plat_heap_stats(size_t *used, size_t *free_commit);
+void plat_mem_tune(void);                       /* при запуске: куча быстрее отдаёт свободные страницы системе */
+void plat_trim(void);
+/* Убрать из оперативной памяти страницы, которые сейчас не нужны (после звонка: звуковые библиотеки Windows
+ * остаются загруженными, но их данные больше не трогаются). Понадобятся — система вернёт их сама. */
+void plat_trim_ram(void);                           /* вернуть системе свободную память кучи */                      /* процессорное время процесса */
 
 /* ---------- процесс ---------- */
 void plat_harden(void (*on_crash)(void));       /* без дампов, без чужих DLL; on_crash затирает секреты */
@@ -73,6 +79,8 @@ void udp_close(intptr_t s);
 /* ---------- хранилище секретов ----------
  * entry — имя записи: "token" (токен) или "vless" (ссылка VLESS).
  * Windows: Диспетчер учётных данных, цель mincord/<entry>; Linux: secret-tool, account <entry>. */
+/* Имена exe запущенных процессов (UTF-8, без пути) — для «Играет в ...» (store.c). -1 — не умеет (не Windows). */
+int plat_proc_names(void (*cb)(const char *exe, void *ud), void *ud);
 int keyring_load(const char *entry, char *out, size_t cap);      /* длина; -1 — записи нет; -2 — ошибка чтения */
 void keyring_readonly(bool on);                 /* --no-save: миграцию старых записей не записывать */
 bool keyring_save(const char *entry, const char *data, size_t n);
