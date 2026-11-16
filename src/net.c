@@ -1197,7 +1197,9 @@ static bool ws_send_raw(const char *data, size_t n) {
     return true;
 }
 
+void (*g_gw_spy)(const char *json);             /* selftest: что уходит в шлюз (в рабочем режиме NULL) */
 void gw_send(const char *json) {
+    if (g_gw_spy) g_gw_spy(json);
     if (G.st == GW_LIVE && !ws_send_raw(json, strlen(json))) schedule_retry(ui_tr("связь потеряна"));
 }
 
@@ -1517,7 +1519,7 @@ i64 gw_next_wake(void) {
 }
 
 void gw_subscribe_ranges(u64 guild, u64 channel, const int *chunk, int n) {
-    if (!guild || !channel || G.st != GW_LIVE || !chunk || n < 1) return;
+    if (!guild || !channel || !chunk || n < 1) return;   /* шлюз не в сети — gw_send не отправит */
     if (n > 3) n = 3;
     char r[128], b[400];
     size_t o = 0;
@@ -1530,7 +1532,7 @@ void gw_subscribe_ranges(u64 guild, u64 channel, const int *chunk, int n) {
     r[o++] = ']';
     r[o] = 0;
     snprintf(b, sizeof b,
-        "{\"op\":14,\"d\":{\"guild_id\":\"%llu\",\"typing\":true,\"threads\":false,\"activities\":false,"
+        "{\"op\":14,\"d\":{\"guild_id\":\"%llu\",\"typing\":true,\"threads\":true,\"activities\":false,"
         "\"members\":[],\"channels\":{\"%llu\":%s},\"thread_member_lists\":[]}}",
         (unsigned long long)guild, (unsigned long long)channel, r);
     gw_send(b);

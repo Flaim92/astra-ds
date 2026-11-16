@@ -5127,9 +5127,8 @@ void threads_open(u64 gid) {
         buf_free(&r.body);
         return;
     }
-    char path[64];
-    snprintf(path, sizeof path, "/guilds/%llu/threads/active", (unsigned long long)gid);
-    http_async("GET", path, NULL, on_threads, (void *)(uintptr_t)gid);
+    /* Активные ветки приходят событием THREAD_LIST_SYNC: подписка op 14 с "threads":true (gw_subscribe, как у
+     * официального клиента). REST /guilds/{id}/threads/active Discord отдаёт только ботам — пользователю 403. */
 }
 int chan_threads(u64 parent, const Channel **out, int max) {
     int n = 0;

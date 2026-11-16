@@ -82,6 +82,8 @@ static bool dirty(const char *s) {
     return false;
 }
 
+static char st_spy_buf[512];                    /* последняя отправка в шлюз (g_gw_spy) */
+static void st_spy(const char *j) { snprintf(st_spy_buf, sizeof st_spy_buf, "%s", j); }
 static void key(int code, u32 ch) { Key k = { .code = code, .ch = ch }; ui_feed_key(&k); }
 static void key_ctrl(u32 ch) { Key k = { .code = K_CHAR, .ch = ch, .ctrl = true }; ui_feed_key(&k); }
 static void key_alt(u32 ch) { Key k = { .code = K_CHAR, .ch = ch, .alt = true }; ui_feed_key(&k); }
@@ -2671,6 +2673,19 @@ static void t_memlist(void) {
         ui_tick();
         check(mu0 && mu1 && mu2, "выгрузка памяти: смена сервера закрывает канал прежнего сервера и список участников; «выкл» - не трогает");
         check(i1 && i2 && i3 && i4 && i5 && i6, "выгрузка памяти: через 5 мин неактивности, новое сообщение продлевает, возврат открывает канал, в звонке и при «выкл» - нет");
+    }
+    {   /* активные ветки: подписка op 14 с "threads":true (как официальный клиент), THREAD_LIST_SYNC — только своего сервера */
+        st_spy_buf[0] = 0;
+        g_gw_spy = st_spy;
+        gw_subscribe(2000, 3001);
+        g_gw_spy = NULL;
+        bool t1 = strstr(st_spy_buf, "\"op\":14") && strstr(st_spy_buf, "\"threads\":true") && !strstr(st_spy_buf, "\"threads\":false");
+        threads_open(2000);
+        ev("THREAD_LIST_SYNC", "{\"guild_id\":\"2000\",\"threads\":[{\"id\":\"3199\",\"type\":11,\"name\":\"живая ветка\",\"parent_id\":\"3001\",\"guild_id\":\"2000\",\"thread_metadata\":{\"archived\":false}}]}");
+        ev("THREAD_LIST_SYNC", "{\"guild_id\":\"2100\",\"threads\":[{\"id\":\"3198\",\"type\":11,\"name\":\"чужая\",\"parent_id\":\"3100\",\"guild_id\":\"2100\",\"thread_metadata\":{\"archived\":false}}]}");
+        bool t2 = chan_find(3199) && !chan_find(3198);
+        ev("THREAD_DELETE", "{\"id\":\"3199\",\"guild_id\":\"2000\",\"parent_id\":\"3001\",\"type\":11}");
+        check(t1 && t2, "активные ветки: op 14 с threads:true вместо REST /threads/active (403), THREAD_LIST_SYNC своего сервера принят, чужого - нет");
     }
     {   /* большие ответы мимо кучи: Buf с pg_ok от 32 КБ — страницы, содержимое цело; без pg_ok — как раньше */
         Buf pb = { .pg_ok = true }, hb = {0};
@@ -6248,10 +6263,20 @@ static int live_mem(void) {
         for (int k = 0; k < opened; k++) if (seen[k] == c->guild_id) dup = true;
         if (dup) continue;
         seen[opened++] = c->guild_id;
+        u64 cg = c->guild_id;
+        threads_open(cg);                        /* как при выборе сервера в окне: принимать его THREAD_LIST_SYNC */
         ui_open_channel(c->id);
         lv_pump(5000 + (int)(now_ms() % 2000));
+        int nt = 0;
+        for (int k = 0; k < S.nchans; k++) if (S.chans[k].guild_id == cg && (S.chans[k].type == CH_THREAD || S.chans[k].type == CH_NEWS_THREAD || S.chans[k].type == CH_PRIV_THREAD)) nt++;
+        say("  сервер %d: активных веток пришло %d\n", opened, nt);
     }
     lv_mem_line("после 4 каналов на разных серверах");
+    {   /* активные ветки: приходят THREAD_LIST_SYNC по подписке op 14 (REST /threads/active больше не шлём) */
+        int nt = 0;
+        for (int i = 0; i < S.nchans; i++) if (S.chans[i].type == CH_THREAD || S.chans[i].type == CH_NEWS_THREAD || S.chans[i].type == CH_PRIV_THREAD) nt++;
+        say("  активных веток в модели: %d (последний открытый сервер и мои)\n", nt);
+    }
     ui_test_select_guild(0);
     lv_pump(3000);
     lv_mem_line("главная, после выгрузки прежнего сервера");

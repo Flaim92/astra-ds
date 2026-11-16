@@ -101,6 +101,7 @@ void acct_wipe_all(void);                        /* --logout, паника: вс
  * Выполняется в главном цикле (не из обработчика ввода). */
 void app_trim_soon(void);                        /* main.c: сжать кучу через несколько секунд покоя */
 void app_trim_in(int ms, bool ram);             /* main.c: сжать кучу через ms (выгрузка памяти), ram — и рабочий набор */
+extern void (*g_gw_spy)(const char *json);      /* selftest: перехват отправки в шлюз */
 bool http_release_idle(void);                   /* net.c: закрыть простаивающие соединения REST (false — что-то идёт) */
 bool http_active(void);                         /* net.c: идёт запрос, отправка файла или капча */
 extern bool g_test_inactive;                    /* selftest: окно «не активно» (выгрузка памяти) */
@@ -513,7 +514,7 @@ bool msg_alert(const Message *m);
  * Хранятся активные ветки открытого сервера (threads_open при входе на сервер) и те, где я участник. */
 enum { TF_JOINED = 1, TF_ARCHIVED = 2, TF_LOCKED = 4, TF_DELETED = 8 };   /* TF_DELETED: открытую ветку удалили — ввод закрыт */
 bool chan_is_thread(const Channel *c);
-void threads_open(u64 gid);                     /* GET /guilds/{id}/threads/active; ветки других серверов (не мои) — убрать */
+void threads_open(u64 gid);                     /* ветки сервера: принимать его THREAD_LIST_SYNC (op 14 threads:true); ветки других серверов (не мои) — убрать */
 int chan_threads(u64 parent, const Channel **out, int max);   /* ветки под каналом, свежие сверху */
 bool thread_create(u64 cid, u64 mid, const char *name, char *err, size_t errn);   /* mid 0 — без сообщения */
 bool thread_member(u64 tid, bool join, char *err, size_t errn);   /* вступить / выйти */
